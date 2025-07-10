@@ -1,0 +1,8 @@
+# This file specifies the code owners for the repository.
+# These users and teams will be requested for review when changes
+# touch the files they own.
+#
+# Place this file in the root, .github/, or docs/ folder of your repository.
+
+# Set yourself as the owner for all files in the repo
+*    @nate3D
