@@ -4,13 +4,76 @@
 _A Dockerized self-hosted GitHub Actions runenr, designed for easy open-source reuse.
 Designed for turn-key deployment to any Docker host environment._
 
+### [Docker Compose](#compose-quickstart) and [Docker CLI](#cli-quickstart) are both supported
+
 The only configuration is to copy the provided `.env.example` to `.env` and populate it accordingly.
 
 ## Features
   - **Auto-registraion of runner from any Docker host with access to `github.com`**
   - **Self-cleanup of runner on container termination**
+  - **Provided images for `linux/amd64`, `linux/arm64`, `linux/arm/v7`, `linux/arm/v6`, `linux/ppc64le`, and `linux/s390x`**
 
-## Quickstart
+---
+
+## Table of Contents
+
+  - [CLI-Quickstart](#cli-quickstart)
+  - [Compose-Quickstart](#compose-quickstart)
+  - [Environment Variables](#environment-variables)
+  - [Updating Runner Version](#updating-runner-version)
+  - [Cleanup](#cleanup)
+  - [Contributing](#contributing)
+  - [License](#license)
+
+
+## CLI-Quickstart
+
+1. (Optional) Create a work directory to persist the workspace.
+    ```bash
+    mkdir -p ~/runner-work
+    ```
+
+2. Run the container (replacing `<OWNER>`, `<REPO>`, `YOUR_TOKEN`)
+    ```bash
+    docker run -d \
+    --name my-self-hosted-runner \
+    --restart unless-stopped \
+    -e REPO_URL="https://github.com/<OWNER>/<REPO>" \
+    -e RUNNER_TOKEN="<YOUR_TOKEN>" \
+    -e RUNNER_NAME="my-self-hosted-runner" \
+    -e RUNNER_WORKDIR="_work" \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -v ~/runner-work:/actions-runner/_work \
+    ghcr.io/velvet-labs-llc/runner:latest
+    ```
+
+3. (Alternative) Use an `.env` file
+  
+    Create a file called `runner.env` with:
+    ```bash
+    REPO_URL=https://github.com/<OWNER>/<REPO>
+    RUNNER_TOKEN=<YOUR_TOKEN>
+    RUNNER_NAME=my-self-hosted-runner
+    RUNNER_WORKDIR=_work
+    ```
+
+    Then:
+    ```bash
+    docker run -d \
+    --name my-self-hosted-runner \
+    --restart unless-stopped \
+    --env-file runner.env \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -v ~/runner-work:/actions-runner/_work \
+    ghcr.io/velvet-labs-llc/runner:latest
+    ```
+
+4. View logs and verify
+    ```bash
+    docker logs -f my-self-hosted-runner
+    ```
+
+## Compose-Quickstart
 
 1. Clone repo  
    ```bash
@@ -63,24 +126,19 @@ Define these in your `.env` (see `.env.example`):
 
 ## Updating Runner Version
 
-To bump the runner to a newer release:
+The runner will handle updating itself anytime it polls GitHub and sees a new version available.
 
-```bash
-# Option A: via Docker Compose
-# (Compose reads RUNNER_VERSION from .env and passes it to build args)
-docker compose build
-docker compose up -d
-
-# Option B: direct docker build
-docker build \
-  --build-arg RUNNER_VERSION=2.325.0 \
-  -t my-runner:2.325.0 .
-docker run -d my-runner:2.325.0
-```
+You may manually specify a version via the `RUNNER_VERSION` environment variable.
 
 ## Cleanup
 
-Remove containers, networks, and volumes:
+*Docker CLI:* Remove the running container and image if no longer needed:
+```bash
+docker rm -f my-self-hosted-runner
+docker rmi ghcr.io/velvet-labs-llc/runner:latest
+```
+
+*Compose:* Remove containers, networks, and volumes:
 
 ```bash
 docker compose down --volumes
