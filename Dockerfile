@@ -42,6 +42,12 @@ RUN apt-get update \
       qemu-user-static \
       gosu \
       wget \
+      docker-compose-plugin \
+      iptables \
+      iproute2 \
+      jq \
+      xz-utils \
+      pigz \
  && rm -rf /var/lib/apt/lists/*
 
 # 2) Install Docker Compose v2 plugin
