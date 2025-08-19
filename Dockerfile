@@ -1,8 +1,5 @@
 # syntax=docker/dockerfile:1
 
-############################################
-# Build-time default for runner version
-############################################
 ARG RUNNER_VERSION=2.325.0
 
 ############################################
@@ -11,19 +8,12 @@ ARG RUNNER_VERSION=2.325.0
 FROM debian:bookworm-slim AS builder
 ARG RUNNER_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
-
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      curl \
-      ca-certificates \
-      tar \
-      gzip \
+ && apt-get install -y --no-install-recommends curl ca-certificates tar gzip \
  && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /runner
-RUN curl -fsSL \
-      https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz \
-    | tar zx --strip-components=1 \
+RUN curl -fsSL https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz \
+ | tar zx --strip-components=1 \
  && chmod +x bin/*
 
 ############################################
@@ -33,10 +23,10 @@ FROM debian:bookworm-slim AS runtime
 ARG RUNNER_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 1) Install OS packages, Docker CLI, qemu, gosu, wget
+# Core deps + Docker Engine (dockerd + CLI + buildx + compose)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg wget gosu jq xz-utils pigz iptables iproute2 qemu-user-static \
+      ca-certificates curl gnupg wget gosu jq xz-utils pigz iptables iproute2 unzip zip \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg \
       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
@@ -46,34 +36,29 @@ RUN apt-get update \
       > /etc/apt/sources.list.d/docker.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      docker-ce-cli docker-compose-plugin \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/*
 
-# 2) Install Docker Compose v2 plugin
-RUN mkdir -p /usr/local/lib/docker/cli-plugins \
- && curl -fsSL \
-      https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-      -o /usr/local/lib/docker/cli-plugins/docker-compose \
- && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+COPY daemon.json /etc/docker/daemon.json
 
-# 3) Create non-root 'actions' user & group
+# Non-root user
 RUN groupadd -r actions \
  && useradd -r -g actions -d /home/actions -m -s /bin/bash actions
 
-# 4) Copy runner bits from builder as 'actions'
+# GitHub runner files
 COPY --from=builder --chown=actions:actions /runner /actions-runner
-
-# 5) Run the runner’s dependency installer (installdependencies.sh)
 RUN /actions-runner/bin/installdependencies.sh
 
-# 6) Prepare workspace dirs with correct ownership
+# Workspace dirs
 RUN mkdir -p /actions-runner/_work /actions-runner/_tool \
  && chown -R actions:actions /actions-runner/_work /actions-runner/_tool
 
-# 7) Copy and set up entrypoint
+# DinD state (optional but recommended)
+VOLUME ["/var/lib/docker"]
+
+# Entrypoint
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /actions-runner
-
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

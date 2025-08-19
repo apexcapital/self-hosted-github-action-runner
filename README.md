@@ -11,7 +11,7 @@ The only configuration is to copy the provided `.env.example` to `.env` and popu
 ## Features
   - **Auto-registraion of runner from any Docker host with access to `github.com`**
   - **Self-cleanup of runner on container termination**
-  - **Provided images for `linux/amd64`, `linux/arm64`, `linux/arm/v7`, `linux/arm/v6`, `linux/ppc64le`, and `linux/s390x`**
+  - **Provided images for `linux/amd64` and `linux/arm64`**
 
 ---
 

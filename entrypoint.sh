@@ -1,82 +1,89 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 cd /actions-runner
 
-#─────────────────────────────────────────────────
-# Docker socket setup for non-root 'actions' user
-#─────────────────────────────────────────────────
-setup_docker() {
-  # Prefer DOCKER_HOST if set to a unix socket; else default path
-  local sock_path="/var/run/docker.sock"
-  if [[ "${DOCKER_HOST:-}" =~ ^unix:// ]]; then
-    sock_path="${DOCKER_HOST#unix://}"
+start_dind() {
+  export DOCKER_HOST="unix:///var/run/docker.sock"
+  export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+
+  mkdir -p /var/run /var/lib/docker /var/log
+
+  if ! command -v dockerd >/dev/null 2>&1; then
+    echo "ERROR: dockerd not installed; install docker-ce & containerd.io." >&2
+    exit 1
   fi
 
-  if [[ -S "${sock_path}" ]]; then
-    # Ensure DOCKER_HOST is set for child processes
-    export DOCKER_HOST="unix://${sock_path}"
-    export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
-    export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-1}"
+  # Ensure 'docker' group exists and 'actions' can access the socket
+  getent group docker >/dev/null 2>&1 || groupadd -r docker
+  usermod -aG docker actions || true
 
-    # Map socket GID to a group visible in the container, then add 'actions'
-    local sock_gid group_name
-    sock_gid="$(stat -c '%g' "${sock_path}")"
-    # If a group with this GID already exists, reuse it; else create 'dockersock'
-    group_name="$(getent group "${sock_gid}" | cut -d: -f1 || true)"
-    if [[ -z "${group_name}" ]]; then
-      group_name="dockersock"
-      # groupadd may race across restarts; ignore if it already exists
-      groupadd -g "${sock_gid}" "${group_name}" 2>/dev/null || true
-    fi
-    usermod -aG "${group_name}" actions || true
+  echo "▶ Starting dockerd (DinD)…"
+  dockerd \
+    --host=unix:///var/run/docker.sock \
+    --data-root="${DOCKER_DATA_ROOT:-/var/lib/docker}" \
+    --storage-driver="${DOCKER_DRIVER:-overlay2}" \
+    --exec-opt "native.cgroupdriver=${DOCKER_CGROUP_DRIVER:-cgroupfs}" \
+    --iptables=true \
+    --log-level="${DOCKERD_LOG_LEVEL:-info}" \
+    > /var/log/dockerd.log 2>&1 &
+  DIND_PID=$!
 
-    # Optional sanity (non-fatal). Avoid -e exit on failure.
-    if command -v docker >/dev/null 2>&1; then
-      if ! gosu actions docker info >/dev/null 2>&1; then
-        echo "NOTE: Docker CLI present but cannot access ${sock_path} yet." >&2
-      fi
-    else
-      echo "WARNING: Docker CLI not installed inside the container." >&2
+  # Wait for daemon to be ready
+  for i in {1..60}; do
+    if docker version >/dev/null 2>&1; then
+      echo "✔ dockerd is ready"
+      return 0
     fi
-  else
-    echo "WARNING: Docker socket not found at ${sock_path}. Mount /var/run/docker.sock." >&2
+    sleep 1
+  done
+  echo "✖ timed out waiting for dockerd; last 200 lines:" >&2
+  tail -n 200 /var/log/dockerd.log || true
+  exit 1
+}
+
+stop_dind() {
+  if [[ -n "${DIND_PID:-}" ]] && kill -0 "$DIND_PID" 2>/dev/null; then
+    echo "⏹ stopping dockerd…"
+    kill "$DIND_PID" || true
+    wait "$DIND_PID" || true
   fi
 }
 
-#─────────────────────────────────────────────────
-# Cleanup: unregister the runner
-#─────────────────────────────────────────────────
 cleanup() {
   echo "⏏️  Unregistering runner…"
-  gosu actions ./config.sh remove \
-    --token "$RUNNER_TOKEN"
+  if [[ -f .runner && -n "${RUNNER_TOKEN:-}" ]]; then
+    gosu actions ./config.sh remove --token "${RUNNER_TOKEN}" || true
+  else
+    echo "Runner not configured; skipping unregister."
+  fi
+  stop_dind
 }
 
-#─────────────────────────────────────────────────
-# Traps
-#─────────────────────────────────────────────────
 trap cleanup EXIT
-trap 'echo "⚙️  Signal received, shutting down runner…"; kill "$RUNNER_PID"' SIGINT SIGTERM
+trap 'echo "⚙️  Signal received, shutting down…"; kill "$RUNNER_PID" 2>/dev/null || true' SIGINT SIGTERM
 
-#─────────────────────────────────────────────────
-# Ensure Docker access before runner starts
-#─────────────────────────────────────────────────
-setup_docker
+# Start Docker-in-Docker
+start_dind
 
-#─────────────────────────────────────────────────
 # Register the runner if not already registered
-#─────────────────────────────────────────────────
-if [ ! -f .runner ]; then
+if [[ ! -f .runner ]]; then
+  export HOME=/home/actions
   gosu actions ./config.sh --unattended \
-    --url    "$REPO_URL" \
-    --token  "$RUNNER_TOKEN" \
+    --url    "${REPO_URL}" \
+    --token  "${RUNNER_TOKEN}" \
     --name   "${RUNNER_NAME:-$(hostname)}" \
-    --work   "${RUNNER_WORKDIR:-_work}"
+    --work   "${RUNNER_WORKDIR:-_work}" \
+    --labels "docker-dind,linux,x64,self-hosted,optimized"
 fi
 
-#─────────────────────────────────────────────────
-# Start the runner
-#─────────────────────────────────────────────────
-gosu actions ./run.sh &
+# Launch runner as 'actions' in background, then wait (no exec)
+export HOME=/home/actions
+gosu actions env \
+  HOME=/home/actions \
+  DOCKER_HOST="${DOCKER_HOST}" \
+  DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}" \
+  /actions-runner/run.sh &
 RUNNER_PID=$!
+
 wait "$RUNNER_PID"
