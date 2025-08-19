@@ -36,18 +36,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 # 1) Install OS packages, Docker CLI, qemu, gosu, wget
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      curl \
-      ca-certificates \
-      docker.io \
-      qemu-user-static \
-      gosu \
-      wget \
-      docker-compose-plugin \
-      iptables \
-      iproute2 \
-      jq \
-      xz-utils \
-      pigz \
+      ca-certificates curl gnupg wget gosu jq xz-utils pigz iptables iproute2 qemu-user-static \
+ && install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/debian/gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+ && chmod a+r /etc/apt/keyrings/docker.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+      https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      docker-ce-cli docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/*
 
 # 2) Install Docker Compose v2 plugin
