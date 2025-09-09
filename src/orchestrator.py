@@ -39,6 +39,14 @@ class RunnerOrchestrator:
     async def start(self) -> None:
         """Start the orchestrator."""
         logger.info("Starting Runner Orchestrator")
+
+        # Validate GitHub token before starting
+        try:
+            await self.github_client.validate_token()
+        except Exception as e:
+            logger.error("GitHub token validation failed", error=str(e))
+            raise Exception(f"Invalid GitHub token or permissions: {e}")
+
         self.is_running = True
 
         # Start background tasks
@@ -272,11 +280,31 @@ class RunnerOrchestrator:
             logger.info(
                 "Scaling to minimum runners", current=current_count, needed=needed
             )
-            for i in range(needed):
+
+            # Limit the number of runners we try to create at once to prevent runaway
+            max_attempts = min(needed, 5)  # Don't try to create more than 5 at once
+            failed_attempts = 0
+
+            for i in range(max_attempts):
                 try:
-                    await self._create_runner()
+                    runner_id = await self._create_runner()
+                    if runner_id is None:
+                        failed_attempts += 1
+                        if failed_attempts >= 3:
+                            logger.error(
+                                "Too many failed attempts to create runners, stopping"
+                            )
+                            break
+                    else:
+                        failed_attempts = 0  # Reset on success
                 except Exception as e:
+                    failed_attempts += 1
                     logger.error("Failed to create minimum runner", error=str(e))
+                    if failed_attempts >= 3:
+                        logger.error(
+                            "Too many failed attempts to create runners, stopping"
+                        )
+                        break
 
     async def _create_runner(self) -> Optional[str]:
         """Create a new runner."""

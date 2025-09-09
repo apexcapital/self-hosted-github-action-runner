@@ -41,6 +41,20 @@ class RunnerOrchestrator:
         logger.info("Starting Runner Orchestrator")
         self.is_running = True
 
+        # Log configuration info
+        if settings.github_org:
+            logger.info(
+                "Running in organization mode - queue-based scaling disabled",
+                org=settings.github_org,
+                scaling_mode="runner_count_based",
+            )
+        else:
+            logger.info(
+                "Running in repository mode - queue-based scaling enabled",
+                repo=settings.github_repo,
+                scaling_mode="queue_based",
+            )
+
         # Start background tasks
         self.running_tasks = [
             asyncio.create_task(self._monitor_queue()),

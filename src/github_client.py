@@ -49,6 +49,42 @@ class GitHubClient:
             "User-Agent": "GitHub-Actions-Runner-Orchestrator/2.0.0",
         }
 
+    async def validate_token(self) -> bool:
+        """Validate the GitHub token and permissions."""
+        try:
+            async with httpx.AsyncClient() as client:
+                # Test basic authentication
+                auth_response = await client.get(
+                    f"{self.base_url}/user", headers=self.headers
+                )
+                auth_response.raise_for_status()
+
+                # Test access to the specific org/repo
+                test_response = await client.get(self.runners_url, headers=self.headers)
+                test_response.raise_for_status()
+
+                logger.info("GitHub token validation successful")
+                return True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                logger.error("GitHub token is invalid or expired")
+                raise Exception("Invalid GitHub token")
+            elif e.response.status_code == 403:
+                logger.error("GitHub token lacks required permissions")
+                raise Exception("Insufficient GitHub token permissions")
+            elif e.response.status_code == 404:
+                logger.error("Organization or repository not found")
+                raise Exception("Organization or repository not found")
+            else:
+                logger.error(
+                    "GitHub API error during validation",
+                    status_code=e.response.status_code,
+                )
+                raise Exception(f"GitHub API error: {e.response.status_code}")
+        except Exception as e:
+            logger.error("GitHub token validation failed", error=str(e))
+            raise Exception(f"Token validation failed: {e}")
+
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
     )

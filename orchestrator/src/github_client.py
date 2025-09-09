@@ -77,9 +77,15 @@ class GitHubClient:
     async def get_workflow_runs(self, status: str = "queued") -> List[Dict[str, Any]]:
         """Get workflow runs by status."""
         if self.org:
-            # For organization, we need to check across all repos
-            # This is more complex and would require additional API calls
-            url = f"{self.base_url}/orgs/{self.org}/actions/runs"
+            # For organization-level runners, we can't get workflow runs directly
+            # The GitHub API doesn't support /orgs/{org}/actions/runs
+            # Instead, we'll return an empty list and rely on runner count-based scaling
+            logger.warning(
+                "Organization-level workflow run monitoring not supported by GitHub API",
+                org=self.org,
+                status=status,
+            )
+            return []
         else:
             url = f"{self.base_url}/repos/{self.repo}/actions/runs"
 
@@ -111,6 +117,15 @@ class GitHubClient:
     async def get_queue_length(self) -> int:
         """Get the current queue length of pending workflow runs."""
         try:
+            if self.org:
+                # For organization-level runners, queue-based scaling is not supported
+                # We'll return 0 to disable queue-based scaling
+                logger.debug(
+                    "Queue-based scaling disabled for organization-level runners",
+                    org=self.org,
+                )
+                return 0
+
             queued_runs = await self.get_workflow_runs("queued")
             in_progress_runs = await self.get_workflow_runs("in_progress")
 
