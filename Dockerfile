@@ -18,10 +18,8 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd -r -u 1000 -m -d /app -s /bin/bash orchestrator \
-    && mkdir -p /app/logs \
-    && chown -R orchestrator:orchestrator /app
+# Create application directory
+RUN mkdir -p /app/logs
 
 WORKDIR /app
 
@@ -30,10 +28,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY --chown=orchestrator:orchestrator . .
-
-# Switch to non-root user
-USER orchestrator
+COPY . .
 
 # Expose port
 EXPOSE 8080
