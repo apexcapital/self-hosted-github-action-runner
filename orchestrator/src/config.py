@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     )
     runner_labels: list[str] = Field(
         default=["docker-dind", "linux", "x64", "self-hosted", "orchestrated"],
-        description="Labels to assign to runners",
+        description="Labels to assign to runners. The 'orchestrated' label is used to identify runners managed by this orchestrator for safe cleanup.",
     )
 
     # Logging Configuration

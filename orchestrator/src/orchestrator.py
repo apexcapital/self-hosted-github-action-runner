@@ -94,24 +94,37 @@ class RunnerOrchestrator:
                     await self._monitor_queue_length()
 
             except Exception as e:
-                logger.error("Error monitoring", error=str(e))
+                logger.error("Error monitoring queue", error=str(e))
+                # Set safe default to prevent future comparison errors
+                self.metrics["current_queue_length"] = 0
+                self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
 
             await asyncio.sleep(settings.poll_interval)
 
     async def _monitor_queue_length(self) -> None:
         """Monitor queue length for repository-level scaling."""
-        queue_length = await self.github_client.get_queue_length()
-        self.metrics["current_queue_length"] = queue_length
-        self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
+        try:
+            queue_length = await self.github_client.get_queue_length()
+            # Ensure queue_length is always an integer
+            if queue_length is None:
+                queue_length = 0
 
-        logger.debug("Queue monitoring", queue_length=queue_length)
+            self.metrics["current_queue_length"] = queue_length
+            self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
 
-        # Scale up if queue is too long
-        if queue_length >= settings.scale_up_threshold:
-            await self._scale_up()
-        # Scale down if queue is minimal
-        elif queue_length <= settings.scale_down_threshold:
-            await self._scale_down()
+            logger.debug("Queue monitoring", queue_length=queue_length)
+
+            # Scale up if queue is too long
+            if queue_length >= settings.scale_up_threshold:
+                await self._scale_up()
+            # Scale down if queue is minimal
+            elif queue_length <= settings.scale_down_threshold:
+                await self._scale_down()
+        except Exception as e:
+            logger.error("Error in queue monitoring", error=str(e))
+            # Set safe default values
+            self.metrics["current_queue_length"] = 0
+            self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
 
     async def _monitor_runner_states(self) -> None:
         """Monitor runner busy states for organization-level scaling."""
@@ -253,11 +266,16 @@ class RunnerOrchestrator:
             await asyncio.sleep(300)  # Clean up every 5 minutes
 
     async def _sync_runners(self) -> None:
-        """Sync with GitHub to remove orphaned runners."""
+        """Sync runners between GitHub and local Docker containers.
+
+        This method safely cleans up orphaned runners by only targeting runners
+        with the 'orchestrated' label. This ensures that manually registered
+        runners or runners from other systems are left untouched.
+        """
         while self.is_running:
             try:
-                # Get runners from GitHub
-                github_runners = await self.github_client.get_runners()
+                # Get orchestrated runners from GitHub (only those with 'orchestrated' label)
+                github_runners = await self.github_client.get_orchestrated_runners()
                 github_names = {runner["name"] for runner in github_runners}
 
                 # Get local container runners
@@ -269,22 +287,24 @@ class RunnerOrchestrator:
                 }
 
                 # Find runners that exist in GitHub but not locally (might be from previous instances)
+                # Only consider orchestrated runners for cleanup
                 orphaned_github = github_names - docker_names
                 if orphaned_github:
                     logger.info(
-                        "Found orphaned runners in GitHub", count=len(orphaned_github)
+                        "Found orphaned orchestrated runners in GitHub",
+                        count=len(orphaned_github),
                     )
                     for runner in github_runners:
                         if runner["name"] in orphaned_github:
                             try:
                                 await self.github_client.delete_runner(runner["id"])
                                 logger.info(
-                                    "Removed orphaned runner from GitHub",
+                                    "Removed orphaned orchestrated runner from GitHub",
                                     name=runner["name"],
                                 )
                             except Exception as e:
                                 logger.error(
-                                    "Failed to remove orphaned runner",
+                                    "Failed to remove orphaned orchestrated runner",
                                     name=runner["name"],
                                     error=str(e),
                                 )

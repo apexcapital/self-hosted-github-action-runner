@@ -75,12 +75,12 @@ class GitHubClient:
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
     )
     async def get_workflow_runs(self, status: str = "queued") -> List[Dict[str, Any]]:
-        """Get workflow runs by status."""
+        """Get workflow runs with the specified status."""
         if self.org:
             # For organization-level runners, we can't get workflow runs directly
             # The GitHub API doesn't support /orgs/{org}/actions/runs
             # Instead, we'll return an empty list and rely on runner count-based scaling
-            logger.warning(
+            logger.debug(
                 "Organization-level workflow run monitoring not supported by GitHub API",
                 org=self.org,
                 status=status,
@@ -140,6 +140,7 @@ class GitHubClient:
             return queue_length
         except Exception as e:
             logger.error("Failed to get queue length", error=str(e))
+            # Always return 0 instead of None to prevent comparison errors
             return 0
 
     async def get_runner_url(self) -> str:
@@ -148,6 +149,33 @@ class GitHubClient:
             return f"https://github.com/{self.org}"
         else:
             return f"https://github.com/{self.repo}"
+
+    async def get_orchestrated_runners(self) -> List[Dict[str, Any]]:
+        """Get all runners that have the 'orchestrated' label.
+
+        This method is used to identify runners that were created by this orchestrator
+        and are safe to deregister during cleanup operations. Runners without the
+        'orchestrated' label are left untouched to avoid interfering with manually
+        registered runners or runners from other systems.
+
+        Returns:
+            List of runner dictionaries that have the 'orchestrated' label
+        """
+        try:
+            all_runners = await self.get_runners()
+            orchestrated_runners = []
+
+            for runner in all_runners:
+                runner_labels = [
+                    label.get("name", "") for label in runner.get("labels", [])
+                ]
+                if "orchestrated" in runner_labels:
+                    orchestrated_runners.append(runner)
+
+            return orchestrated_runners
+        except Exception as e:
+            logger.error("Failed to get orchestrated runners", error=str(e))
+            return []
 
     async def get_managed_runner_states(
         self, managed_runner_names: List[str]
