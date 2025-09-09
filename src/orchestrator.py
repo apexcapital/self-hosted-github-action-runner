@@ -204,22 +204,38 @@ class RunnerOrchestrator:
             )
             return
 
-        runners_needed = min(
-            settings.scale_up_threshold, settings.max_runners - current_count
-        )
+        # Check if we recently scaled up to prevent runaway scaling
+        if self.metrics["last_scale_action"]:
+            last_action = self.metrics["last_scale_action"]
+            if last_action["action"] == "scale_up":
+                last_time = datetime.fromisoformat(
+                    last_action["timestamp"].replace("Z", "+00:00")
+                )
+                time_diff = datetime.now(timezone.utc) - last_time
+                if time_diff.total_seconds() < 120:  # 2 minute cooldown
+                    logger.debug("Scale up cooldown active, skipping")
+                    return
+
+        # Be more conservative - only create 1-2 runners at a time instead of scale_up_threshold
+        runners_needed = min(2, settings.max_runners - current_count)
 
         logger.info("Scaling up runners", current=current_count, adding=runners_needed)
 
+        successful_creates = 0
         for i in range(runners_needed):
             try:
-                await self._create_runner()
+                container_id = await self._create_runner()
+                if container_id:
+                    successful_creates += 1
+                    # Add a small delay between creating runners
+                    await asyncio.sleep(5)
             except Exception as e:
                 logger.error("Failed to create runner during scale up", error=str(e))
 
         self.metrics["last_scale_action"] = {
             "action": "scale_up",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "runners_added": runners_needed,
+            "runners_added": successful_creates,
         }
 
     async def _scale_down(self) -> None:
@@ -273,7 +289,11 @@ class RunnerOrchestrator:
 
     async def _scale_to_minimum(self) -> None:
         """Ensure minimum number of runners are running."""
-        current_count = len(self.active_runners)
+        # First, get the current actual count from docker to ensure accuracy
+        docker_runners = await self.docker_client.get_runners()
+        running_runners = [r for r in docker_runners if r["status"] == "running"]
+        current_count = len(running_runners)
+
         needed = settings.min_runners - current_count
 
         if needed > 0:
@@ -282,7 +302,7 @@ class RunnerOrchestrator:
             )
 
             # Limit the number of runners we try to create at once to prevent runaway
-            max_attempts = min(needed, 5)  # Don't try to create more than 5 at once
+            max_attempts = min(needed, 3)  # Don't try to create more than 3 at once
             failed_attempts = 0
 
             for i in range(max_attempts):
@@ -290,13 +310,15 @@ class RunnerOrchestrator:
                     runner_id = await self._create_runner()
                     if runner_id is None:
                         failed_attempts += 1
-                        if failed_attempts >= 3:
+                        if failed_attempts >= 2:  # More strict failure threshold
                             logger.error(
                                 "Too many failed attempts to create runners, stopping"
                             )
                             break
                     else:
                         failed_attempts = 0  # Reset on success
+                        # Add delay between creates to avoid overwhelming GitHub API
+                        await asyncio.sleep(3)
                 except Exception as e:
                     failed_attempts += 1
                     logger.error("Failed to create minimum runner", error=str(e))

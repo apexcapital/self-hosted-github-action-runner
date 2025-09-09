@@ -1,11 +1,11 @@
 """Docker client for managing runner containers."""
 
-import asyncio
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
 import uuid
 
 import docker
+from docker.errors import NotFound as DockerNotFound, APIError
 import structlog
 
 from .config import settings
@@ -28,7 +28,7 @@ class DockerClient:
         """Ensure the runner network exists."""
         try:
             self.client.networks.get(settings.runner_network)
-        except docker.errors.NotFound:
+        except DockerNotFound:
             logger.info("Creating runner network", network=settings.runner_network)
             self.client.networks.create(
                 settings.runner_network,
@@ -57,7 +57,7 @@ class DockerClient:
         container_name = f"{self.container_prefix}-{runner_name}-{uuid.uuid4().hex[:8]}"
 
         # Merge default and custom labels
-        all_labels = settings.runner_labels.copy()
+        all_labels = list(settings.runner_labels)
         if labels:
             all_labels.extend(labels)
 
@@ -76,7 +76,7 @@ class DockerClient:
                 name=work_volume_name,
                 labels={"runner": runner_name, "managed-by": "runner-orchestrator"},
             )
-        except Exception as e:
+        except APIError as e:
             logger.warning(
                 "Volume might already exist", volume=work_volume_name, error=str(e)
             )
@@ -128,7 +128,7 @@ class DockerClient:
             try:
                 volume = self.client.volumes.get(work_volume_name)
                 volume.remove()
-            except:
+            except (DockerNotFound, APIError):
                 pass
             raise
 
@@ -165,7 +165,7 @@ class DockerClient:
                     volume = self.client.volumes.get(work_volume_name)
                     volume.remove()
                     logger.info("Removed runner work volume", volume=work_volume_name)
-                except Exception as e:
+                except (DockerNotFound, APIError) as e:
                     logger.warning(
                         "Failed to remove work volume",
                         volume=work_volume_name,
@@ -177,10 +177,10 @@ class DockerClient:
             )
             return True
 
-        except docker.errors.NotFound:
+        except DockerNotFound:
             logger.warning("Container not found for removal", container_id=container_id)
             return True
-        except Exception as e:
+        except APIError as e:
             logger.error(
                 "Failed to remove runner container",
                 container_id=container_id,
@@ -197,6 +197,14 @@ class DockerClient:
 
             runners = []
             for container in containers:
+                # Skip the orchestrator container itself
+                if container.labels.get("component") == "orchestrator":
+                    continue
+
+                # Only include containers that have a runner-name label (actual runners)
+                if not container.labels.get("runner-name"):
+                    continue
+
                 runner_info = {
                     "id": container.id,
                     "name": container.name,
@@ -212,7 +220,7 @@ class DockerClient:
 
             return runners
 
-        except Exception as e:
+        except APIError as e:
             logger.error("Failed to get runner containers", error=str(e))
             return []
 
@@ -222,7 +230,7 @@ class DockerClient:
             container = self.client.containers.get(container_id)
             logs = container.logs(tail=tail, timestamps=True)
             return logs.decode("utf-8")
-        except Exception as e:
+        except (DockerNotFound, APIError) as e:
             logger.error(
                 "Failed to get runner logs", container_id=container_id, error=str(e)
             )
@@ -241,7 +249,7 @@ class DockerClient:
                 try:
                     await self.remove_runner(container.id)
                     cleaned += 1
-                except Exception as e:
+                except APIError as e:
                     logger.error(
                         "Failed to cleanup container",
                         container_id=container.id,
@@ -253,6 +261,6 @@ class DockerClient:
 
             return cleaned
 
-        except Exception as e:
+        except APIError as e:
             logger.error("Failed to cleanup dead containers", error=str(e))
             return 0
