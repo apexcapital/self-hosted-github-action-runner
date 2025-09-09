@@ -226,7 +226,7 @@ main_setup() {
     echo "3. Run the development server: $0 run"
     echo "4. Visit http://localhost:8080/docs for API documentation"
     echo
-    print_info "For production deployment, see ../README.orchestrator.md"
+    print_info "For production deployment, see ../README.md"
 }
 
 # Handle script arguments

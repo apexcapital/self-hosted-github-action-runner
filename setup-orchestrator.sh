@@ -79,7 +79,7 @@ setup_environment() {
     fi
     
     # Prompt for GitHub token if not set
-    if ! grep -q "^GITHUB_TOKEN=.*[^[:space:]]" .env 2>/dev/null; then
+    if ! grep -q "^ORCHESTRATOR_GITHUB_TOKEN=" .env 2>/dev/null || grep -q "^ORCHESTRATOR_GITHUB_TOKEN=your_github_personal_access_token_here" .env 2>/dev/null; then
         echo
         print_info "GitHub Personal Access Token is required"
         echo "You can create one at: https://github.com/settings/personal-access-tokens/new"
@@ -91,7 +91,7 @@ setup_environment() {
         echo
         
         if [[ -n "$github_token" ]]; then
-            sed -i.bak "s/^GITHUB_TOKEN=.*/GITHUB_TOKEN=$github_token/" .env
+            sed -i.bak "s/^ORCHESTRATOR_GITHUB_TOKEN=.*/ORCHESTRATOR_GITHUB_TOKEN=$github_token/" .env
             rm -f .env.bak
             print_success "GitHub token configured"
         else
@@ -100,34 +100,36 @@ setup_environment() {
     fi
     
     # Prompt for organization or repository
-    if ! grep -q "^GITHUB_ORG=.*[^[:space:]]" .env 2>/dev/null && ! grep -q "^GITHUB_REPO=.*[^[:space:]]" .env 2>/dev/null; then
-        echo
-        print_info "Choose GitHub scope:"
-        echo "1) Organization-wide runners"
-        echo "2) Repository-specific runners"
-        read -p "Enter choice (1 or 2): " choice
-        
-        case $choice in
-            1)
-                read -p "Enter your GitHub organization name: " org_name
-                if [[ -n "$org_name" ]]; then
-                    sed -i.bak "s/^GITHUB_ORG=.*/GITHUB_ORG=$org_name/" .env
-                    rm -f .env.bak
-                    print_success "Organization configured: $org_name"
-                fi
-                ;;
-            2)
-                read -p "Enter repository (format: owner/repo): " repo_name
-                if [[ -n "$repo_name" ]]; then
-                    sed -i.bak "s/^GITHUB_REPO=.*/GITHUB_REPO=$repo_name/" .env
-                    rm -f .env.bak
-                    print_success "Repository configured: $repo_name"
-                fi
-                ;;
-            *)
-                print_warning "Invalid choice. Please edit .env manually"
-                ;;
-        esac
+    if ! grep -q "^ORCHESTRATOR_GITHUB_ORG=" .env 2>/dev/null || grep -q "^ORCHESTRATOR_GITHUB_ORG=your-github-organization" .env 2>/dev/null; then
+        if ! grep -q "^ORCHESTRATOR_GITHUB_REPO=" .env 2>/dev/null || grep -q "^ORCHESTRATOR_GITHUB_REPO=owner/repository-name" .env 2>/dev/null; then
+            echo
+            print_info "Choose GitHub scope:"
+            echo "1) Organization-wide runners"
+            echo "2) Repository-specific runners"
+            read -p "Enter choice (1 or 2): " choice
+            
+            case $choice in
+                1)
+                    read -p "Enter your GitHub organization name: " org_name
+                    if [[ -n "$org_name" ]]; then
+                        sed -i.bak "s/^ORCHESTRATOR_GITHUB_ORG=.*/ORCHESTRATOR_GITHUB_ORG=$org_name/" .env
+                        rm -f .env.bak
+                        print_success "Organization configured: $org_name"
+                    fi
+                    ;;
+                2)
+                    read -p "Enter repository (format: owner/repo): " repo_name
+                    if [[ -n "$repo_name" ]]; then
+                        sed -i.bak "s/^ORCHESTRATOR_GITHUB_REPO=.*/ORCHESTRATOR_GITHUB_REPO=$repo_name/" .env
+                        rm -f .env.bak
+                        print_success "Repository configured: $repo_name"
+                    fi
+                    ;;
+                *)
+                    print_warning "Invalid choice. Please edit .env manually"
+                    ;;
+            esac
+        fi
     fi
 }
 
@@ -254,12 +256,12 @@ main() {
     print_success "🎉 Setup completed successfully!"
     echo
     print_info "Next steps:"
-    echo "1. Review the configuration in .env.orchestrator"
+    echo "1. Review the configuration in .env"
     echo "2. Check the orchestrator logs: docker logs -f orchestrator"
     echo "3. Monitor runners at: http://localhost:8080/docs"
     echo "4. Update your GitHub Actions workflows to use 'self-hosted,orchestrated' labels"
     echo
-    print_info "For more information, see README.orchestrator.md"
+    print_info "For more information, see README.md"
 }
 
 # Handle script arguments
