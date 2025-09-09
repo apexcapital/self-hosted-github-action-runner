@@ -152,7 +152,7 @@ class RunnerOrchestrator:
             await asyncio.sleep(300)  # Clean up every 5 minutes
 
     async def _sync_runners(self) -> None:
-        """Sync with GitHub to remove orphaned runners."""
+        """Sync with GitHub to remove orphaned runners and unregistered containers."""
         while self.is_running:
             try:
                 # Get runners from GitHub (only managed ones, not actions-runner-*)
@@ -182,6 +182,40 @@ class RunnerOrchestrator:
                     if runner["runner_name"]
                 }
 
+                # Find containers that exist locally but aren't registered with GitHub
+                # These are likely failed registrations that should be removed
+                unregistered_containers = docker_names - github_names
+                if unregistered_containers:
+                    logger.info(
+                        "Found unregistered containers (removing)",
+                        count=len(unregistered_containers),
+                        names=list(unregistered_containers)[:5],
+                    )
+                    for runner in docker_runners:
+                        if (
+                            runner["runner_name"] in unregistered_containers
+                            and runner["status"] == "running"
+                        ):
+                            try:
+                                # Check if container has been running for more than 2 minutes
+                                # Give it time to register before removing
+                                container_age = self._get_container_age_minutes(runner)
+                                if container_age > 2:
+                                    await self.docker_client.remove_runner(runner["id"])
+                                    logger.info(
+                                        "Removed unregistered container",
+                                        runner_name=runner["runner_name"],
+                                        container_id=runner["id"],
+                                        age_minutes=container_age,
+                                    )
+                                    self.metrics["total_runners_destroyed"] += 1
+                            except Exception as e:
+                                logger.error(
+                                    "Failed to remove unregistered container",
+                                    runner_name=runner["runner_name"],
+                                    error=str(e),
+                                )
+
                 # Find runners that exist in GitHub but not locally (might be from previous instances)
                 orphaned_github = github_names - docker_names
                 if orphaned_github:
@@ -206,15 +240,25 @@ class RunnerOrchestrator:
             except Exception as e:
                 logger.error("Error syncing runners", error=str(e))
 
-            await asyncio.sleep(600)  # Sync every 10 minutes
+            await asyncio.sleep(120)  # Sync more frequently - every 2 minutes
 
     async def _scale_up(self) -> None:
-        """Scale up runners."""
-        current_count = len(self.active_runners)
+        """Scale up runners based on registered runner count."""
+        # Count registered runners, not just containers
+        try:
+            github_runners = await self.github_client.get_runners()
+            current_count = len(github_runners)
+        except Exception as e:
+            logger.warning(
+                "Could not get GitHub runners for scale up, using active runners",
+                error=str(e),
+            )
+            current_count = len(self.active_runners)
+
         if current_count >= settings.max_runners:
             logger.warning(
                 "Cannot scale up, at maximum runners",
-                current=current_count,
+                current_registered=current_count,
                 max=settings.max_runners,
             )
             return
@@ -242,7 +286,11 @@ class RunnerOrchestrator:
         # Be more conservative - only create 1-2 runners at a time instead of scale_up_threshold
         runners_needed = min(2, settings.max_runners - current_count)
 
-        logger.info("Scaling up runners", current=current_count, adding=runners_needed)
+        logger.info(
+            "Scaling up runners",
+            current_registered=current_count,
+            adding=runners_needed,
+        )
 
         successful_creates = 0
         for i in range(runners_needed):
@@ -262,12 +310,24 @@ class RunnerOrchestrator:
         }
 
     async def _scale_down(self) -> None:
-        """Scale down runners."""
-        current_count = len(self.active_runners)
+        """Scale down runners based on registered runner count."""
+        # Count registered runners, not just containers
+        try:
+            github_runners = await self.github_client.get_runners()
+            current_count = len(github_runners)
+            registered_names = {runner["name"] for runner in github_runners}
+        except Exception as e:
+            logger.warning(
+                "Could not get GitHub runners for scale down, using active runners",
+                error=str(e),
+            )
+            current_count = len(self.active_runners)
+            registered_names = set()
+
         if current_count <= settings.min_runners:
             logger.debug(
                 "Cannot scale down, at minimum runners",
-                current=current_count,
+                current_registered=current_count,
                 min=settings.min_runners,
             )
             return
@@ -279,28 +339,40 @@ class RunnerOrchestrator:
         runners_to_remove = min(1, current_count - settings.min_runners)
 
         logger.info(
-            "Scaling down runners", current=current_count, removing=runners_to_remove
+            "Scaling down runners",
+            current_registered=current_count,
+            removing=runners_to_remove,
         )
 
-        # Remove oldest idle runners first
+        # Remove oldest idle runners first, but only if they're registered
+        docker_runners = await self.docker_client.get_runners()
+        registered_containers = [
+            r
+            for r in docker_runners
+            if r["runner_name"] in registered_names and r["status"] == "running"
+        ]
+
+        # Sort by creation time (oldest first)
         runners_by_age = sorted(
-            self.active_runners.items(), key=lambda x: x[1]["created_at"]
+            registered_containers, key=lambda x: x.get("created_at", "")
         )
 
         removed = 0
-        for runner_id, runner_info in runners_by_age:
+        for runner_info in runners_by_age:
             if removed >= runners_to_remove:
                 break
 
             try:
-                await self.docker_client.remove_runner(runner_id)
-                logger.info("Removed runner during scale down", runner_id=runner_id)
+                await self.docker_client.remove_runner(runner_info["id"])
+                logger.info(
+                    "Removed runner during scale down", runner_id=runner_info["id"]
+                )
                 removed += 1
                 self.metrics["total_runners_destroyed"] += 1
             except Exception as e:
                 logger.error(
                     "Failed to remove runner during scale down",
-                    runner_id=runner_id,
+                    runner_id=runner_info["id"],
                     error=str(e),
                 )
 
@@ -311,17 +383,47 @@ class RunnerOrchestrator:
         }
 
     async def _scale_to_minimum(self) -> None:
-        """Ensure minimum number of runners are running."""
-        # First, get the current actual count from docker to ensure accuracy
+        """Ensure minimum number of runners are running and registered."""
+        # Get both Docker containers and GitHub registered runners
         docker_runners = await self.docker_client.get_runners()
-        running_runners = [r for r in docker_runners if r["status"] == "running"]
-        current_count = len(running_runners)
+        running_containers = [r for r in docker_runners if r["status"] == "running"]
+
+        # Get registered runners from GitHub (only our managed ones)
+        try:
+            github_runners = await self.github_client.get_runners()
+            registered_names = {runner["name"] for runner in github_runners}
+
+            # Count only containers that are both running AND registered
+            registered_running_count = len(
+                [r for r in running_containers if r["runner_name"] in registered_names]
+            )
+
+            logger.debug(
+                "Runner count analysis",
+                docker_running=len(running_containers),
+                github_registered=len(github_runners),
+                both_running_and_registered=registered_running_count,
+                min_required=settings.min_runners,
+            )
+
+            # Use registered count for scaling decisions
+            current_count = registered_running_count
+
+        except Exception as e:
+            logger.warning(
+                "Could not get GitHub runners for scaling, using Docker count",
+                error=str(e),
+            )
+            current_count = len(running_containers)
 
         needed = settings.min_runners - current_count
 
         if needed > 0:
             logger.info(
-                "Scaling to minimum runners", current=current_count, needed=needed
+                "Scaling to minimum runners",
+                current_registered=current_count,
+                needed=needed,
+                docker_running=len(running_containers),
             )
 
             # Limit the number of runners we try to create at once to prevent runaway
@@ -388,6 +490,32 @@ class RunnerOrchestrator:
             logger.error("Failed to create runner", error=str(e))
             return None
 
+    def _get_container_age_minutes(self, runner_info: Dict) -> float:
+        """Calculate how long a container has been running in minutes."""
+        try:
+            if "created_at" in runner_info and runner_info["created_at"]:
+                # Try to parse the created_at timestamp
+                created_at_str = runner_info["created_at"]
+                if isinstance(created_at_str, str):
+                    # Handle different timestamp formats
+                    if created_at_str.endswith("Z"):
+                        created_at_str = created_at_str.replace("Z", "+00:00")
+                    elif "+" not in created_at_str and not created_at_str.endswith(
+                        "+00:00"
+                    ):
+                        created_at_str += "+00:00"
+
+                    created_at = datetime.fromisoformat(created_at_str)
+                    age_seconds = (
+                        datetime.now(timezone.utc) - created_at
+                    ).total_seconds()
+                    return age_seconds / 60.0
+        except Exception as e:
+            logger.warning("Could not calculate container age", error=str(e))
+
+        # Fallback: assume container is old enough if we can't determine age
+        return 5.0
+
     async def get_status(self) -> Dict:
         """Get orchestrator status."""
         docker_runners = await self.docker_client.get_runners()
@@ -395,13 +523,27 @@ class RunnerOrchestrator:
         # Get info about ignored runners for monitoring
         try:
             all_github_runners = await self.github_client.get_all_runners()
+            github_runners = await self.github_client.get_runners()  # Only managed ones
             ignored_runners = [
                 r["name"]
                 for r in all_github_runners
                 if r["name"].startswith("actions-runner-")
             ]
+
+            # Calculate registered vs unregistered containers
+            github_names = {runner["name"] for runner in github_runners}
+            docker_names = {
+                r["runner_name"] for r in docker_runners if r["status"] == "running"
+            }
+            registered_running = len(docker_names & github_names)
+            unregistered_running = len(docker_names - github_names)
+
         except Exception:
             ignored_runners = []
+            registered_running = 0
+            unregistered_running = len(
+                [r for r in docker_runners if r["status"] == "running"]
+            )
 
         return {
             "orchestrator": {
@@ -413,6 +555,8 @@ class RunnerOrchestrator:
                 "docker_containers": len(
                     [r for r in docker_runners if r["status"] == "running"]
                 ),
+                "registered_running": registered_running,
+                "unregistered_running": unregistered_running,
                 "total_created": self.metrics["total_runners_created"],
                 "total_destroyed": self.metrics["total_runners_destroyed"],
                 "ignored_existing": len(ignored_runners),
