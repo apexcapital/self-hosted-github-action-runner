@@ -205,6 +205,14 @@ class DockerClient:
                 if not container.labels.get("runner-name"):
                     continue
 
+                # Skip existing actions-runner-* containers that we should not manage
+                if container.name.startswith("actions-runner-"):
+                    logger.debug(
+                        "Ignoring existing actions-runner container",
+                        name=container.name,
+                    )
+                    continue
+
                 runner_info = {
                     "id": container.id,
                     "name": container.name,
@@ -246,6 +254,14 @@ class DockerClient:
 
             cleaned = 0
             for container in containers:
+                # Skip existing actions-runner-* containers that we should not manage
+                if container.name.startswith("actions-runner-"):
+                    logger.debug(
+                        "Ignoring existing actions-runner container during cleanup",
+                        name=container.name,
+                    )
+                    continue
+
                 try:
                     await self.remove_runner(container.id)
                     cleaned += 1

@@ -29,9 +29,20 @@ async def get_runners(request: Request) -> Dict[str, List[Dict[str, Any]]]:
     docker_runners = await orchestrator.docker_client.get_runners()
     github_runners = await orchestrator.github_client.get_runners()
 
+    # Get information about ignored runners for monitoring
+    try:
+        all_github_runners = await orchestrator.github_client.get_all_runners()
+        ignored_runners = [
+            r for r in all_github_runners if r["name"].startswith("actions-runner-")
+        ]
+    except Exception as e:
+        logger.warning("Could not fetch ignored runners info", error=str(e))
+        ignored_runners = []
+
     return {
         "docker_runners": docker_runners,
         "github_runners": github_runners,
+        "ignored_runners": ignored_runners,
         "active_tracked": list(orchestrator.active_runners.values()),
     }
 
@@ -119,6 +130,9 @@ async def get_metrics(request: Request) -> Dict[str, Any]:
         "github_actions_runners_active": status["runners"]["active"],
         "github_actions_runners_total_created": status["runners"]["total_created"],
         "github_actions_runners_total_destroyed": status["runners"]["total_destroyed"],
+        "github_actions_runners_ignored_existing": status["runners"][
+            "ignored_existing"
+        ],
         "github_actions_queue_length": status["queue"]["current_length"],
         "github_actions_orchestrator_running": (
             1 if status["orchestrator"]["running"] else 0

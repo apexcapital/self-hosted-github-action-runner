@@ -155,9 +155,24 @@ class RunnerOrchestrator:
         """Sync with GitHub to remove orphaned runners."""
         while self.is_running:
             try:
-                # Get runners from GitHub
+                # Get runners from GitHub (only managed ones, not actions-runner-*)
                 github_runners = await self.github_client.get_runners()
                 github_names = {runner["name"] for runner in github_runners}
+
+                # Also get all runners for logging/monitoring purposes
+                all_github_runners = await self.github_client.get_all_runners()
+                ignored_runners = [
+                    r["name"]
+                    for r in all_github_runners
+                    if r["name"].startswith("actions-runner-")
+                ]
+
+                if ignored_runners:
+                    logger.debug(
+                        "Found existing actions-runner-* runners (ignoring)",
+                        count=len(ignored_runners),
+                        names=ignored_runners[:5],  # Log first 5 names to avoid spam
+                    )
 
                 # Get local container runners
                 docker_runners = await self.docker_client.get_runners()
@@ -207,9 +222,17 @@ class RunnerOrchestrator:
         # Check if we recently scaled up to prevent runaway scaling
         if self.metrics["last_scale_action"]:
             last_action = self.metrics["last_scale_action"]
-            if last_action["action"] == "scale_up":
-                last_time = datetime.fromisoformat(
-                    last_action["timestamp"].replace("Z", "+00:00")
+            if (
+                isinstance(last_action, dict)
+                and last_action.get("action") == "scale_up"
+            ):
+                timestamp = last_action.get("timestamp")
+                if timestamp:
+                    last_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                last_time = (
+                    datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    if timestamp
+                    else datetime.min
                 )
                 time_diff = datetime.now(timezone.utc) - last_time
                 if time_diff.total_seconds() < 120:  # 2 minute cooldown
@@ -369,6 +392,17 @@ class RunnerOrchestrator:
         """Get orchestrator status."""
         docker_runners = await self.docker_client.get_runners()
 
+        # Get info about ignored runners for monitoring
+        try:
+            all_github_runners = await self.github_client.get_all_runners()
+            ignored_runners = [
+                r["name"]
+                for r in all_github_runners
+                if r["name"].startswith("actions-runner-")
+            ]
+        except Exception:
+            ignored_runners = []
+
         return {
             "orchestrator": {
                 "running": self.is_running,
@@ -381,6 +415,7 @@ class RunnerOrchestrator:
                 ),
                 "total_created": self.metrics["total_runners_created"],
                 "total_destroyed": self.metrics["total_runners_destroyed"],
+                "ignored_existing": len(ignored_runners),
             },
             "queue": {
                 "current_length": self.metrics["current_queue_length"],

@@ -1,8 +1,6 @@
 """GitHub API client for managing runners."""
 
-import asyncio
 from typing import List, Dict, Optional, Any
-from datetime import datetime, timezone
 
 import httpx
 import structlog
@@ -99,13 +97,38 @@ class GitHubClient:
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
     )
-    async def get_runners(self) -> List[Dict[str, Any]]:
-        """Get list of all runners."""
+    async def get_all_runners(self) -> List[Dict[str, Any]]:
+        """Get list of ALL runners including actions-runner-* ones we don't manage."""
         async with httpx.AsyncClient() as client:
             response = await client.get(self.runners_url, headers=self.headers)
             response.raise_for_status()
             data = response.json()
             return data.get("runners", [])
+
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    async def get_runners(self) -> List[Dict[str, Any]]:
+        """Get list of all runners, excluding actions-runner-* runners from management."""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(self.runners_url, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+            all_runners = data.get("runners", [])
+
+            # Filter out existing actions-runner-* runners that we should not manage
+            managed_runners = []
+            for runner in all_runners:
+                runner_name = runner.get("name", "")
+                if runner_name.startswith("actions-runner-"):
+                    logger.debug(
+                        "Ignoring existing actions-runner from GitHub API",
+                        name=runner_name,
+                    )
+                    continue
+                managed_runners.append(runner)
+
+            return managed_runners
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
