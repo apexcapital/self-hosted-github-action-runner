@@ -1,11 +1,11 @@
 """Docker client for managing runner containers."""
 
-import asyncio
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
 import uuid
 
 import docker
+from docker.errors import NotFound, APIError
 import structlog
 
 from .config import settings
@@ -21,6 +21,13 @@ class DockerClient:
         self.client = docker.from_env()
         self.container_prefix = "github-runner"
 
+        # Orchestrator-specific labels for safe resource management
+        self.orchestrator_labels = {
+            "managed-by": "runner-orchestrator",
+            "orchestrator-id": settings.orchestrator_id,
+            "orchestrator-version": settings.orchestrator_version,
+        }
+
         # Ensure network exists
         self._ensure_network()
 
@@ -28,12 +35,12 @@ class DockerClient:
         """Ensure the runner network exists."""
         try:
             self.client.networks.get(settings.runner_network)
-        except docker.errors.NotFound:
+        except NotFound:
             logger.info("Creating runner network", network=settings.runner_network)
             self.client.networks.create(
                 settings.runner_network,
                 driver="bridge",
-                labels={"managed-by": "runner-orchestrator"},
+                labels=self.orchestrator_labels,
             )
 
     async def create_runner(
@@ -57,7 +64,7 @@ class DockerClient:
         container_name = f"{self.container_prefix}-{runner_name}-{uuid.uuid4().hex[:8]}"
 
         # Merge default and custom labels
-        all_labels = settings.runner_labels.copy()
+        all_labels = list(settings.runner_labels)
         if labels:
             all_labels.extend(labels)
 
@@ -71,17 +78,30 @@ class DockerClient:
 
         # Create volume for runner work directory
         work_volume_name = f"{container_name}-work"
+        volume_labels = self.orchestrator_labels.copy()
+        volume_labels.update({"runner": runner_name, "type": "work-volume"})
+
         try:
             self.client.volumes.create(
                 name=work_volume_name,
-                labels={"runner": runner_name, "managed-by": "runner-orchestrator"},
+                labels=volume_labels,
             )
-        except Exception as e:
+        except APIError as e:
             logger.warning(
                 "Volume might already exist", volume=work_volume_name, error=str(e)
             )
 
         # Container configuration
+        container_labels = self.orchestrator_labels.copy()
+        container_labels.update(
+            {
+                "runner-name": runner_name,
+                "created-at": datetime.now(timezone.utc).isoformat(),
+                "repo-url": repo_url,
+                "type": "runner-container",
+            }
+        )
+
         container_config = {
             "image": settings.runner_image,
             "name": container_name,
@@ -92,12 +112,7 @@ class DockerClient:
             },
             "network": settings.runner_network,
             "restart_policy": {"Name": "unless-stopped"},
-            "labels": {
-                "managed-by": "runner-orchestrator",
-                "runner-name": runner_name,
-                "created-at": datetime.now(timezone.utc).isoformat(),
-                "repo-url": repo_url,
-            },
+            "labels": container_labels,
             "privileged": True,  # Required for Docker-in-Docker
             "detach": True,
         }
@@ -128,7 +143,7 @@ class DockerClient:
             try:
                 volume = self.client.volumes.get(work_volume_name)
                 volume.remove()
-            except:
+            except (NotFound, APIError):
                 pass
             raise
 
@@ -165,7 +180,7 @@ class DockerClient:
                     volume = self.client.volumes.get(work_volume_name)
                     volume.remove()
                     logger.info("Removed runner work volume", volume=work_volume_name)
-                except Exception as e:
+                except (NotFound, APIError) as e:
                     logger.warning(
                         "Failed to remove work volume",
                         volume=work_volume_name,
@@ -177,7 +192,7 @@ class DockerClient:
             )
             return True
 
-        except docker.errors.NotFound:
+        except NotFound:
             logger.warning("Container not found for removal", container_id=container_id)
             return True
         except Exception as e:
@@ -191,9 +206,15 @@ class DockerClient:
     async def get_runners(self) -> List[Dict[str, Any]]:
         """Get list of all managed runner containers."""
         try:
-            containers = self.client.containers.list(
-                all=True, filters={"label": "managed-by=runner-orchestrator"}
-            )
+            # Only get containers managed by this orchestrator instance
+            filters = {
+                "label": [
+                    "managed-by=runner-orchestrator",
+                    f"orchestrator-id={settings.orchestrator_id}",
+                    "type=runner-container",
+                ]
+            }
+            containers = self.client.containers.list(all=True, filters=filters)
 
             runners = []
             for container in containers:
@@ -229,12 +250,18 @@ class DockerClient:
             return f"Error getting logs: {str(e)}"
 
     async def cleanup_dead_containers(self) -> int:
-        """Clean up dead or exited runner containers."""
+        """Clean up dead or exited runner containers managed by this orchestrator."""
         try:
-            containers = self.client.containers.list(
-                all=True,
-                filters={"label": "managed-by=runner-orchestrator", "status": "exited"},
-            )
+            # Only cleanup containers managed by this orchestrator instance
+            filters = {
+                "label": [
+                    "managed-by=runner-orchestrator",
+                    f"orchestrator-id={settings.orchestrator_id}",
+                    "type=runner-container",
+                ],
+                "status": "exited",
+            }
+            containers = self.client.containers.list(all=True, filters=filters)
 
             cleaned = 0
             for container in containers:
@@ -256,3 +283,91 @@ class DockerClient:
         except Exception as e:
             logger.error("Failed to cleanup dead containers", error=str(e))
             return 0
+
+    async def cleanup_orphaned_resources(self) -> Dict[str, int]:
+        """Clean up orphaned volumes and unused images managed by this orchestrator."""
+        cleaned = {"volumes": 0, "images": 0}
+
+        try:
+            # Clean up orphaned volumes
+            all_volumes = self.client.volumes.list()
+            for volume in all_volumes:
+                labels = volume.attrs.get("Labels") or {}
+                if (
+                    labels.get("managed-by") == "runner-orchestrator"
+                    and labels.get("orchestrator-id") == settings.orchestrator_id
+                    and labels.get("type") == "work-volume"
+                ):
+                    # Check if the associated container still exists
+                    runner_name = labels.get("runner")
+                    if runner_name:
+                        # Look for containers with this runner name
+                        filters = {
+                            "label": [
+                                f"runner-name={runner_name}",
+                                f"orchestrator-id={settings.orchestrator_id}",
+                            ]
+                        }
+                        containers = self.client.containers.list(
+                            all=True, filters=filters
+                        )
+
+                        if not containers:
+                            try:
+                                volume.remove()
+                                cleaned["volumes"] += 1
+                                logger.info(
+                                    "Removed orphaned volume",
+                                    volume=volume.name,
+                                    runner=runner_name,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "Failed to remove orphaned volume",
+                                    volume=volume.name,
+                                    error=str(e),
+                                )
+
+            # Clean up unused images with our tags (be more conservative here)
+            # Only remove images that are not currently being used by any container
+            try:
+                # Get all images
+                all_images = self.client.images.list()
+                for image in all_images:
+                    # Check if this image has our orchestrator labels
+                    labels = image.labels or {}
+                    if (
+                        labels.get("managed-by") == "runner-orchestrator"
+                        and labels.get("orchestrator-id") == settings.orchestrator_id
+                    ):
+                        # Check if any container is using this image
+                        image_in_use = False
+                        for container in self.client.containers.list(all=True):
+                            if container.image.id == image.id:
+                                image_in_use = True
+                                break
+
+                        if not image_in_use:
+                            try:
+                                self.client.images.remove(image.id, force=False)
+                                cleaned["images"] += 1
+                                logger.info(
+                                    "Removed unused image", image_id=image.short_id
+                                )
+                            except Exception as e:
+                                logger.debug(
+                                    "Could not remove image (likely in use)",
+                                    image_id=image.short_id,
+                                    error=str(e),
+                                )
+            except Exception as e:
+                logger.warning("Error during image cleanup", error=str(e))
+
+            if cleaned["volumes"] > 0 or cleaned["images"] > 0:
+                logger.info("Cleaned up orphaned resources", **cleaned)
+
+            return cleaned
+
+        except Exception as e:
+            logger.error("Failed to cleanup orphaned resources", error=str(e))
+            return cleaned

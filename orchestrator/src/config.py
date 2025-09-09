@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     """Application settings."""
 
     # GitHub Configuration
-    github_token: str = Field(..., description="GitHub Personal Access Token")
+    github_token: str = Field("", description="GitHub Personal Access Token")
     github_org: Optional[str] = Field(
         None, description="GitHub organization (optional)"
     )
@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     log_level: str = Field("INFO", description="Logging level")
     structured_logging: bool = Field(True, description="Enable structured logging")
 
+    # Orchestrator Identification
+    orchestrator_id: str = Field(
+        "apex-runner-orchestrator",
+        description="Unique identifier for this orchestrator instance",
+    )
+    orchestrator_version: str = Field(
+        "1.0.0", description="Version of the orchestrator"
+    )
+
     # Redis Configuration (optional for distributed setups)
     redis_url: Optional[str] = Field(
         None, description="Redis URL for distributed coordination"
@@ -63,4 +72,5 @@ class Settings(BaseSettings):
 
 
 # Global settings instance
-settings = Settings()
+# Fields have defaults via Field(), Pydantic handles this automatically
+settings = Settings()  # type: ignore # Pydantic Settings with defaults

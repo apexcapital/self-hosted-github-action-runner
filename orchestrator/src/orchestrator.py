@@ -83,26 +83,105 @@ class RunnerOrchestrator:
         logger.info("Orchestrator stopped")
 
     async def _monitor_queue(self) -> None:
-        """Monitor GitHub Actions queue and trigger scaling decisions."""
+        """Monitor GitHub Actions queue/runner states and trigger scaling decisions."""
         while self.is_running:
             try:
-                queue_length = await self.github_client.get_queue_length()
-                self.metrics["current_queue_length"] = queue_length
-                self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
-
-                logger.debug("Queue monitoring", queue_length=queue_length)
-
-                # Scale up if queue is too long
-                if queue_length >= settings.scale_up_threshold:
-                    await self._scale_up()
-                # Scale down if queue is minimal
-                elif queue_length <= settings.scale_down_threshold:
-                    await self._scale_down()
+                if settings.github_org:
+                    # Organization mode: Scale based on runner busy states
+                    await self._monitor_runner_states()
+                else:
+                    # Repository mode: Scale based on queue length
+                    await self._monitor_queue_length()
 
             except Exception as e:
-                logger.error("Error monitoring queue", error=str(e))
+                logger.error("Error monitoring", error=str(e))
 
             await asyncio.sleep(settings.poll_interval)
+
+    async def _monitor_queue_length(self) -> None:
+        """Monitor queue length for repository-level scaling."""
+        queue_length = await self.github_client.get_queue_length()
+        self.metrics["current_queue_length"] = queue_length
+        self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
+
+        logger.debug("Queue monitoring", queue_length=queue_length)
+
+        # Scale up if queue is too long
+        if queue_length >= settings.scale_up_threshold:
+            await self._scale_up()
+        # Scale down if queue is minimal
+        elif queue_length <= settings.scale_down_threshold:
+            await self._scale_down()
+
+    async def _monitor_runner_states(self) -> None:
+        """Monitor runner busy states for organization-level scaling."""
+        try:
+            # Get names of our managed runners
+            managed_runner_names = list(self.active_runners.keys())
+
+            if not managed_runner_names:
+                logger.debug("No managed runners to monitor")
+                return
+
+            # Get current states from GitHub
+            runner_states = await self.github_client.get_managed_runner_states(
+                managed_runner_names
+            )
+
+            online_runners = [
+                r for r in runner_states.values() if r.get("status") == "online"
+            ]
+            busy_runners = [r for r in online_runners if r.get("busy", False)]
+            idle_runners = [r for r in online_runners if not r.get("busy", False)]
+
+            total_managed = len(managed_runner_names)
+            total_online = len(online_runners)
+            total_busy = len(busy_runners)
+            total_idle = len(idle_runners)
+
+            logger.debug(
+                "Runner state monitoring",
+                total_managed=total_managed,
+                total_online=total_online,
+                busy=total_busy,
+                idle=total_idle,
+            )
+
+            # Update metrics
+            self.metrics["current_queue_length"] = 0  # Not applicable for org mode
+            self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
+
+            # Scaling logic: Ensure at least 1 idle runner, max 15 total
+            max_runners = 15
+
+            if total_idle == 0 and total_managed < max_runners:
+                # No idle runners and we're under the cap - scale up
+                logger.info(
+                    "All runners busy, scaling up",
+                    busy_runners=total_busy,
+                    idle_runners=total_idle,
+                    total_managed=total_managed,
+                )
+                await self._scale_up()
+            elif total_idle > 2 and total_managed > settings.min_runners:
+                # Too many idle runners - scale down (but keep at least min_runners)
+                logger.info(
+                    "Too many idle runners, scaling down",
+                    busy_runners=total_busy,
+                    idle_runners=total_idle,
+                    total_managed=total_managed,
+                )
+                await self._scale_down()
+            else:
+                logger.debug(
+                    "Runner levels optimal",
+                    busy_runners=total_busy,
+                    idle_runners=total_idle,
+                    total_managed=total_managed,
+                )
+
+        except Exception as e:
+            logger.error("Error monitoring runner states", error=str(e))
 
     async def _manage_runners(self) -> None:
         """Manage runner lifecycle and health."""
@@ -146,12 +225,28 @@ class RunnerOrchestrator:
             await asyncio.sleep(30)  # Check every 30 seconds
 
     async def _cleanup_dead_containers(self) -> None:
-        """Periodically clean up dead containers."""
+        """Periodically clean up dead containers and orphaned resources."""
+        cleanup_counter = 0
         while self.is_running:
             try:
+                # Clean up dead containers every cycle
                 cleaned = await self.docker_client.cleanup_dead_containers()
                 if cleaned > 0:
                     self.metrics["total_runners_destroyed"] += cleaned
+
+                # Clean up orphaned resources every 5 cycles (25 minutes)
+                cleanup_counter += 1
+                if cleanup_counter >= 5:
+                    cleanup_counter = 0
+                    cleaned_resources = (
+                        await self.docker_client.cleanup_orphaned_resources()
+                    )
+                    logger.info(
+                        "Resource cleanup completed",
+                        volumes_cleaned=cleaned_resources["volumes"],
+                        images_cleaned=cleaned_resources["images"],
+                    )
+
             except Exception as e:
                 logger.error("Error cleaning up containers", error=str(e))
 
@@ -202,19 +297,35 @@ class RunnerOrchestrator:
     async def _scale_up(self) -> None:
         """Scale up runners."""
         current_count = len(self.active_runners)
-        if current_count >= settings.max_runners:
+
+        # For organization mode, enforce max of 15 runners
+        max_allowed = 15 if settings.github_org else settings.max_runners
+
+        if current_count >= max_allowed:
             logger.warning(
                 "Cannot scale up, at maximum runners",
                 current=current_count,
-                max=settings.max_runners,
+                max=max_allowed,
+                mode="organization" if settings.github_org else "repository",
             )
             return
 
-        runners_needed = min(
-            settings.scale_up_threshold, settings.max_runners - current_count
-        )
+        # For organization mode, add just 1 runner at a time
+        # For repository mode, use the threshold-based approach
+        if settings.github_org:
+            runners_needed = 1
+        else:
+            runners_needed = min(
+                settings.scale_up_threshold, max_allowed - current_count
+            )
 
-        logger.info("Scaling up runners", current=current_count, adding=runners_needed)
+        logger.info(
+            "Scaling up runners",
+            current=current_count,
+            adding=runners_needed,
+            max_allowed=max_allowed,
+            mode="organization" if settings.github_org else "repository",
+        )
 
         for i in range(runners_needed):
             try:

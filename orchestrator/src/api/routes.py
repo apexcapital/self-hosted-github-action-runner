@@ -105,6 +105,100 @@ async def get_runner_logs(
         raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
 
 
+@router.post("/maintenance/cleanup")
+async def cleanup_resources(request: Request) -> Dict[str, Any]:
+    """Manually trigger cleanup of dead containers and orphaned resources."""
+    orchestrator = request.app.state.orchestrator
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Orchestrator not available")
+
+    try:
+        # Clean up dead containers
+        dead_containers = await orchestrator.docker_client.cleanup_dead_containers()
+
+        # Clean up orphaned resources
+        orphaned_resources = (
+            await orchestrator.docker_client.cleanup_orphaned_resources()
+        )
+
+        return {
+            "message": "Cleanup completed successfully",
+            "dead_containers_removed": dead_containers,
+            "orphaned_volumes_removed": orphaned_resources["volumes"],
+            "unused_images_removed": orphaned_resources["images"],
+        }
+    except Exception as e:
+        logger.error("Manual cleanup failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
+
+@router.get("/maintenance/status")
+async def get_maintenance_status(request: Request) -> Dict[str, Any]:
+    """Get maintenance and resource usage information."""
+    orchestrator = request.app.state.orchestrator
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Orchestrator not available")
+
+    try:
+        # Get Docker resource information for our orchestrator
+        from ..config import settings
+
+        # Count containers by type
+        all_containers = orchestrator.docker_client.client.containers.list(all=True)
+        our_containers = {"orchestrator": 0, "runner": 0, "other": 0}
+
+        for container in all_containers:
+            labels = container.labels or {}
+            if labels.get("orchestrator-id") == settings.orchestrator_id:
+                container_type = labels.get("type", "unknown")
+                if "orchestrator" in container_type:
+                    our_containers["orchestrator"] += 1
+                elif "runner" in container_type:
+                    our_containers["runner"] += 1
+                else:
+                    our_containers["other"] += 1
+
+        # Count volumes
+        all_volumes = orchestrator.docker_client.client.volumes.list()
+        our_volumes = 0
+        for volume in all_volumes:
+            labels = volume.attrs.get("Labels") or {}
+            if labels.get("orchestrator-id") == settings.orchestrator_id:
+                our_volumes += 1
+
+        # Count networks
+        all_networks = orchestrator.docker_client.client.networks.list()
+        our_networks = 0
+        for network in all_networks:
+            labels = network.attrs.get("Labels") or {}
+            if labels.get("orchestrator-id") == settings.orchestrator_id:
+                our_networks += 1
+
+        # Count images
+        all_images = orchestrator.docker_client.client.images.list()
+        our_images = 0
+        for image in all_images:
+            labels = image.labels or {}
+            if labels.get("orchestrator-id") == settings.orchestrator_id:
+                our_images += 1
+
+        return {
+            "orchestrator_id": settings.orchestrator_id,
+            "orchestrator_version": settings.orchestrator_version,
+            "resources": {
+                "containers": our_containers,
+                "volumes": our_volumes,
+                "networks": our_networks,
+                "images": our_images,
+            },
+        }
+    except Exception as e:
+        logger.error("Failed to get maintenance status", error=str(e))
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get maintenance status: {str(e)}"
+        )
+
+
 @router.get("/metrics")
 async def get_metrics(request: Request) -> Dict[str, Any]:
     """Get Prometheus-style metrics."""

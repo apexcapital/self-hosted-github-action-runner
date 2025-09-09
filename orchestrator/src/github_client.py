@@ -148,3 +148,37 @@ class GitHubClient:
             return f"https://github.com/{self.org}"
         else:
             return f"https://github.com/{self.repo}"
+
+    async def get_managed_runner_states(
+        self, managed_runner_names: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Get the busy/idle state of our managed runners.
+
+        Args:
+            managed_runner_names: List of runner names we're managing
+
+        Returns:
+            Dict mapping runner name to its state info
+        """
+        try:
+            all_runners = await self.get_runners()
+            managed_states = {}
+
+            for runner in all_runners:
+                runner_name = runner.get("name", "")
+                if runner_name in managed_runner_names:
+                    managed_states[runner_name] = {
+                        "id": runner.get("id"),
+                        "name": runner_name,
+                        "status": runner.get("status", "unknown"),
+                        "busy": runner.get("busy", False),
+                        "os": runner.get("os", "unknown"),
+                        "labels": [
+                            label.get("name", "") for label in runner.get("labels", [])
+                        ],
+                    }
+
+            return managed_states
+        except Exception as e:
+            logger.error("Failed to get managed runner states", error=str(e))
+            return {}
