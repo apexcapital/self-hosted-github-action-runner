@@ -24,10 +24,15 @@ FROM ${BASE_IMAGE} AS runtime
 ARG RUNNER_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Add labels for orchestrator management
+LABEL managed-by="runner-orchestrator"
+LABEL runner-version="${RUNNER_VERSION}"
+
 # Core deps + Docker Engine (dockerd + CLI + buildx + compose)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg wget gosu jq xz-utils pigz iptables iproute2 unzip zip \
+      git openssh-client build-essential python3 python3-pip nodejs npm \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg \
       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
@@ -57,9 +62,13 @@ RUN mkdir -p /actions-runner/_work /actions-runner/_tool \
 # DinD state (optional but recommended)
 VOLUME ["/var/lib/docker"]
 
-# Entrypoint
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# Enhanced entrypoint for orchestrator integration
+COPY entrypoint.enhanced.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep -f "run.sh" > /dev/null || exit 1
 
 WORKDIR /actions-runner
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
