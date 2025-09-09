@@ -66,20 +66,20 @@ check_prerequisites() {
 setup_environment() {
     print_info "Setting up environment configuration..."
     
-    if [[ ! -f .env.orchestrator ]]; then
-        if [[ -f .env.orchestrator.example ]]; then
-            cp .env.orchestrator.example .env.orchestrator
-            print_success "Created .env.orchestrator from example"
-        else
-            print_error "Example environment file not found"
-            exit 1
-        fi
+    if [[ ! -f .env.example ]]; then
+        print_error "Example environment file not found"
+        exit 1
+    fi
+    
+    if [[ ! -f .env ]]; then
+        cp .env.example .env
+        print_success "Created .env from example"
     else
-        print_warning ".env.orchestrator already exists, skipping creation"
+        print_warning ".env already exists, skipping creation"
     fi
     
     # Prompt for GitHub token if not set
-    if ! grep -q "^GITHUB_TOKEN=.*[^[:space:]]" .env.orchestrator 2>/dev/null; then
+    if ! grep -q "^GITHUB_TOKEN=.*[^[:space:]]" .env 2>/dev/null; then
         echo
         print_info "GitHub Personal Access Token is required"
         echo "You can create one at: https://github.com/settings/personal-access-tokens/new"
@@ -91,16 +91,16 @@ setup_environment() {
         echo
         
         if [[ -n "$github_token" ]]; then
-            sed -i.bak "s/^GITHUB_TOKEN=.*/GITHUB_TOKEN=$github_token/" .env.orchestrator
-            rm -f .env.orchestrator.bak
+            sed -i.bak "s/^GITHUB_TOKEN=.*/GITHUB_TOKEN=$github_token/" .env
+            rm -f .env.bak
             print_success "GitHub token configured"
         else
-            print_warning "No token provided. Please edit .env.orchestrator manually"
+            print_warning "No token provided. Please edit .env manually"
         fi
     fi
     
     # Prompt for organization or repository
-    if ! grep -q "^GITHUB_ORG=.*[^[:space:]]" .env.orchestrator 2>/dev/null && ! grep -q "^GITHUB_REPO=.*[^[:space:]]" .env.orchestrator 2>/dev/null; then
+    if ! grep -q "^GITHUB_ORG=.*[^[:space:]]" .env 2>/dev/null && ! grep -q "^GITHUB_REPO=.*[^[:space:]]" .env 2>/dev/null; then
         echo
         print_info "Choose GitHub scope:"
         echo "1) Organization-wide runners"
@@ -111,21 +111,21 @@ setup_environment() {
             1)
                 read -p "Enter your GitHub organization name: " org_name
                 if [[ -n "$org_name" ]]; then
-                    sed -i.bak "s/^GITHUB_ORG=.*/GITHUB_ORG=$org_name/" .env.orchestrator
-                    rm -f .env.orchestrator.bak
+                    sed -i.bak "s/^GITHUB_ORG=.*/GITHUB_ORG=$org_name/" .env
+                    rm -f .env.bak
                     print_success "Organization configured: $org_name"
                 fi
                 ;;
             2)
                 read -p "Enter repository (format: owner/repo): " repo_name
                 if [[ -n "$repo_name" ]]; then
-                    sed -i.bak "s/^GITHUB_REPO=.*/GITHUB_REPO=$repo_name/" .env.orchestrator
-                    rm -f .env.orchestrator.bak
+                    sed -i.bak "s/^GITHUB_REPO=.*/GITHUB_REPO=$repo_name/" .env
+                    rm -f .env.bak
                     print_success "Repository configured: $repo_name"
                 fi
                 ;;
             *)
-                print_warning "Invalid choice. Please edit .env.orchestrator manually"
+                print_warning "Invalid choice. Please edit .env manually"
                 ;;
         esac
     fi
@@ -137,7 +137,7 @@ deploy_orchestrator() {
     
     # Build the orchestrator image
     print_info "Building orchestrator image..."
-    if docker-compose -f docker-compose.orchestrator.yml build; then
+    if docker-compose build; then
         print_success "Orchestrator image built successfully"
     else
         print_error "Failed to build orchestrator image"
@@ -146,7 +146,7 @@ deploy_orchestrator() {
     
     # Build the enhanced runner image
     print_info "Building enhanced runner image..."
-    if docker build -f Dockerfile.orchestrated -t ghcr.io/apexcapital/runner:latest .; then
+    if docker build -f Dockerfile -t ghcr.io/apexcapital/runner:latest .; then
         print_success "Enhanced runner image built successfully"
     else
         print_error "Failed to build runner image"
@@ -155,7 +155,7 @@ deploy_orchestrator() {
     
     # Deploy the orchestrator
     print_info "Starting orchestrator services..."
-    if docker-compose -f docker-compose.orchestrator.yml up -d; then
+    if docker-compose up -d; then
         print_success "Orchestrator services started"
     else
         print_error "Failed to start orchestrator services"
@@ -176,7 +176,7 @@ wait_for_services() {
         
         if [[ $i -eq 30 ]]; then
             print_error "Orchestrator failed to start within 5 minutes"
-            print_info "Check logs with: docker logs github-runner-orchestrator"
+            print_info "Check logs with: docker logs orchestrator"
             exit 1
         fi
         
@@ -207,9 +207,9 @@ show_status() {
     
     echo
     print_info "Useful Commands:"
-    echo "  View logs: docker logs -f github-runner-orchestrator"
-    echo "  Stop services: docker-compose -f docker-compose.orchestrator.yml down"
-    echo "  Restart services: docker-compose -f docker-compose.orchestrator.yml restart"
+    echo "  View logs: docker logs -f orchestrator"
+    echo "  Stop services: docker-compose down"
+    echo "  Restart services: docker-compose restart"
     echo "  Check status: curl http://localhost:8080/api/v1/status | jq"
 }
 
@@ -255,7 +255,7 @@ main() {
     echo
     print_info "Next steps:"
     echo "1. Review the configuration in .env.orchestrator"
-    echo "2. Check the orchestrator logs: docker logs -f github-runner-orchestrator"
+    echo "2. Check the orchestrator logs: docker logs -f orchestrator"
     echo "3. Monitor runners at: http://localhost:8080/docs"
     echo "4. Update your GitHub Actions workflows to use 'self-hosted,orchestrated' labels"
     echo
@@ -267,7 +267,7 @@ case "${1:-}" in
     "cleanup")
         print_header
         print_info "Cleaning up orchestrator deployment..."
-        docker-compose -f docker-compose.orchestrator.yml down --volumes
+        docker-compose down --volumes
         docker rmi ghcr.io/apexcapital/runner:latest 2>/dev/null || true
         print_success "Cleanup completed"
         ;;
@@ -275,11 +275,11 @@ case "${1:-}" in
         show_status
         ;;
     "logs")
-        docker logs -f github-runner-orchestrator
+        docker logs -f orchestrator
         ;;
     "restart")
         print_info "Restarting orchestrator services..."
-        docker-compose -f docker-compose.orchestrator.yml restart
+        docker-compose restart
         print_success "Services restarted"
         ;;
     *)

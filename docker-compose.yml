@@ -1,20 +1,58 @@
 services:
-  runner:
+  orchestrator:
     build:
       context: .
-      args:
-        RUNNER_VERSION: ${RUNNER_VERSION}
-    privileged: true
-    environment:
-      REPO_URL:       ${REPO_URL}
-      RUNNER_TOKEN:   ${RUNNER_TOKEN}
-      RUNNER_NAME:    ${RUNNER_NAME}
-      RUNNER_WORKDIR: ${RUNNER_WORKDIR:-_work}
-    volumes:
-      - runner-work:/actions-runner/_work
-      - dind-data:/var/lib/docker
+      dockerfile: Dockerfile
+    container_name: orchestrator
     restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "9090:9090"  # Metrics port
+    environment:
+      # GitHub Configuration
+      ORCHESTRATOR_GITHUB_TOKEN: ${ORCHESTRATOR_GITHUB_TOKEN}
+      ORCHESTRATOR_GITHUB_ORG: ${ORCHESTRATOR_GITHUB_ORG:-}
+      ORCHESTRATOR_GITHUB_REPO: ${ORCHESTRATOR_GITHUB_REPO:-}
+      
+      # Runner Configuration
+      ORCHESTRATOR_RUNNER_IMAGE: ${ORCHESTRATOR_RUNNER_IMAGE:-ghcr.io/apexcapital/runner:latest}
+      ORCHESTRATOR_RUNNER_VERSION: ${ORCHESTRATOR_RUNNER_VERSION:-2.325.0}
+      
+      # Scaling Configuration
+      ORCHESTRATOR_MIN_RUNNERS: ${ORCHESTRATOR_MIN_RUNNERS:-2}
+      ORCHESTRATOR_MAX_RUNNERS: ${ORCHESTRATOR_MAX_RUNNERS:-10}
+      ORCHESTRATOR_SCALE_UP_THRESHOLD: ${ORCHESTRATOR_SCALE_UP_THRESHOLD:-3}
+      ORCHESTRATOR_SCALE_DOWN_THRESHOLD: ${ORCHESTRATOR_SCALE_DOWN_THRESHOLD:-1}
+      ORCHESTRATOR_IDLE_TIMEOUT: ${ORCHESTRATOR_IDLE_TIMEOUT:-300}
+      
+      # Monitoring Configuration
+      ORCHESTRATOR_POLL_INTERVAL: ${ORCHESTRATOR_POLL_INTERVAL:-30}
+      ORCHESTRATOR_METRICS_PORT: 9090
+      ORCHESTRATOR_LOG_LEVEL: ${ORCHESTRATOR_LOG_LEVEL:-INFO}
+      ORCHESTRATOR_STRUCTURED_LOGGING: ${ORCHESTRATOR_STRUCTURED_LOGGING:-true}
+      
+      # Docker Configuration
+      ORCHESTRATOR_DOCKER_SOCKET: unix:///var/run/docker.sock
+      ORCHESTRATOR_RUNNER_NETWORK: ${ORCHESTRATOR_RUNNER_NETWORK:-runner-network}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - orchestrator-logs:/app/logs
+    networks:
+      - runner-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  runner-network:
+    driver: bridge
+    labels:
+      managed-by: "runner-orchestrator"
 
 volumes:
-  runner-work:
-  dind-data:
+  orchestrator-logs:
+    labels:
+      managed-by: "runner-orchestrator"

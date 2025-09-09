@@ -1,65 +1,46 @@
 # syntax=docker/dockerfile:1
 
-ARG RUNNER_VERSION=2.325.0
-ARG BASE_IMAGE=debian:bookworm-slim
+FROM python:3.12-slim
 
-############################################
-# Builder: download & extract GitHub runner
-############################################
-FROM ${BASE_IMAGE} AS builder
-ARG RUNNER_VERSION
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates tar gzip \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /runner
-RUN curl -fsSL https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz \
- | tar zx --strip-components=1 \
- && chmod +x bin/*
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
-############################################
-# Runtime: Debian Bookworm-Slim + Docker & .NET deps
-############################################
-FROM ${BASE_IMAGE} AS runtime
-ARG RUNNER_VERSION
-ENV DEBIAN_FRONTEND=noninteractive
+# Install Docker CLI (for managing runner containers)
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
 
-# Core deps + Docker Engine (dockerd + CLI + buildx + compose)
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg wget gosu jq xz-utils pigz iptables iproute2 unzip zip \
- && install -m 0755 -d /etc/apt/keyrings \
- && curl -fsSL https://download.docker.com/linux/debian/gpg \
-      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
- && chmod a+r /etc/apt/keyrings/docker.gpg \
- && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-      https://download.docker.com/linux/debian bookworm stable" \
-      > /etc/apt/sources.list.d/docker.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
-      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
- && rm -rf /var/lib/apt/lists/*
+# Create non-root user
+RUN useradd -r -u 1000 -m -d /app -s /bin/bash orchestrator \
+    && mkdir -p /app/logs \
+    && chown -R orchestrator:orchestrator /app
 
-COPY daemon.json /etc/docker/daemon.json
+WORKDIR /app
 
-# Non-root user
-RUN groupadd -r actions \
- && useradd -r -g actions -d /home/actions -m -s /bin/bash actions
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# GitHub runner files
-COPY --from=builder --chown=actions:actions /runner /actions-runner
-RUN /actions-runner/bin/installdependencies.sh
+# Copy application code
+COPY --chown=orchestrator:orchestrator . .
 
-# Workspace dirs
-RUN mkdir -p /actions-runner/_work /actions-runner/_tool \
- && chown -R actions:actions /actions-runner/_work /actions-runner/_tool
+# Switch to non-root user
+USER orchestrator
 
-# DinD state (optional but recommended)
-VOLUME ["/var/lib/docker"]
+# Expose port
+EXPOSE 8080
 
-# Entrypoint
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
-WORKDIR /actions-runner
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Run the orchestrator
+CMD ["python", "main.py"]
