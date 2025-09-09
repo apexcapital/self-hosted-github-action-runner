@@ -83,7 +83,7 @@ cp .env.example .env
 # Edit .env with your settings
 
 # Build and start the orchestrator
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ### 3. Configuration
@@ -334,14 +334,14 @@ This system completely replaces the previous static runner setup. If you were us
 
 ### Migration Process
 
-1. **Stop old runners**: `docker-compose down` (if using old setup)
+1. **Stop old runners**: `docker compose down` (if using old setup)
 2. **Update configuration**: Use new `.env` format (see Configuration section)
-3. **Deploy orchestrator**: `docker-compose up -d --build`
+3. **Deploy orchestrator**: `docker compose up -d --build`
 4. **Update workflows**: No changes needed - existing workflows work automatically
 
 ### File Changes
 
-- `docker-compose.yml` → Now orchestrator-only
+- `docker compose.yml` → Now orchestrator-only
 - `.env.example` → Simplified environment variables
 - `Dockerfile` → Now builds orchestrator image
 - `setup-orchestrator.sh` → Updated for new file structure

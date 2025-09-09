@@ -48,7 +48,7 @@ check_prerequisites() {
     fi
     
     # Check Docker Compose
-    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
+    if ! command -v docker compose &> /dev/null && ! docker compose version &> /dev/null; then
         print_error "Docker Compose is not installed. Please install Docker Compose first."
         exit 1
     fi
@@ -137,7 +137,7 @@ deploy_orchestrator() {
     
     # Build the orchestrator image
     print_info "Building orchestrator image..."
-    if docker-compose build; then
+    if docker compose build; then
         print_success "Orchestrator image built successfully"
     else
         print_error "Failed to build orchestrator image"
@@ -155,7 +155,7 @@ deploy_orchestrator() {
     
     # Deploy the orchestrator
     print_info "Starting orchestrator services..."
-    if docker-compose up -d; then
+    if docker compose up -d; then
         print_success "Orchestrator services started"
     else
         print_error "Failed to start orchestrator services"
@@ -208,8 +208,8 @@ show_status() {
     echo
     print_info "Useful Commands:"
     echo "  View logs: docker logs -f orchestrator"
-    echo "  Stop services: docker-compose down"
-    echo "  Restart services: docker-compose restart"
+    echo "  Stop services: docker compose down"
+    echo "  Restart services: docker compose restart"
     echo "  Check status: curl http://localhost:8080/api/v1/status | jq"
 }
 
@@ -267,7 +267,7 @@ case "${1:-}" in
     "cleanup")
         print_header
         print_info "Cleaning up orchestrator deployment..."
-        docker-compose down --volumes
+        docker compose down --volumes
         docker rmi ghcr.io/apexcapital/runner:latest 2>/dev/null || true
         print_success "Cleanup completed"
         ;;
@@ -279,7 +279,7 @@ case "${1:-}" in
         ;;
     "restart")
         print_info "Restarting orchestrator services..."
-        docker-compose restart
+        docker compose restart
         print_success "Services restarted"
         ;;
     *)
