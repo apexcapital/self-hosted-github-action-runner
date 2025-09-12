@@ -1,5 +1,3 @@
-import asyncio
-import logging
 import signal
 import sys
 from contextlib import asynccontextmanager
@@ -9,18 +7,17 @@ import uvicorn
 from fastapi import FastAPI
 
 from src.api.routes import router
-from src.config import settings
 from src.orchestrator import RunnerOrchestrator
 from src.utils.logging import setup_logging
 
 # Global orchestrator instance
-orchestrator: RunnerOrchestrator = None
+orchestrator: RunnerOrchestrator = None  # type: ignore
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(fastapi_app: FastAPI):
     """FastAPI lifespan context manager."""
-    global orchestrator
+    global orchestrator  # pylint: disable=global-statement
 
     # Setup logging
     setup_logging()
@@ -34,7 +31,7 @@ async def lifespan(app: FastAPI):
         await orchestrator.start()
 
         # Store orchestrator in app state for access in routes
-        app.state.orchestrator = orchestrator
+        fastapi_app.state.orchestrator = orchestrator
 
         logger.info("Orchestrator started successfully")
         yield
@@ -84,7 +81,7 @@ async def root():
     }
 
 
-def signal_handler(signum, frame):
+def signal_handler(signum, _):
     """Handle shutdown signals gracefully."""
     logger = structlog.get_logger()
     logger.info("Received shutdown signal", signal=signum)

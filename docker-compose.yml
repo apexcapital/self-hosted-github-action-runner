@@ -22,7 +22,7 @@ services:
       ORCHESTRATOR_GITHUB_REPO: ${ORCHESTRATOR_GITHUB_REPO:-}
       
       # Runner Configuration
-      ORCHESTRATOR_RUNNER_IMAGE: ${ORCHESTRATOR_RUNNER_IMAGE:-ghcr.io/apexcapital/runner:latest}
+      ORCHESTRATOR_RUNNER_IMAGE: ${ORCHESTRATOR_RUNNER_IMAGE:-myoung34/github-runner:latest}
       ORCHESTRATOR_RUNNER_VERSION: ${ORCHESTRATOR_RUNNER_VERSION:-2.325.0}
       
       # Scaling Configuration
