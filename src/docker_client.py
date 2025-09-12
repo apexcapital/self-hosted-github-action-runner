@@ -199,34 +199,49 @@ class DockerClient:
 
             runners = []
             for container in containers:
-                # Skip the orchestrator container itself
-                if container.labels.get("component") == "orchestrator":
-                    continue
+                try:
+                    # Skip the orchestrator container itself
+                    if container.labels.get("component") == "orchestrator":
+                        continue
 
-                # Only include containers that have a runner-name label (actual runners)
-                if not container.labels.get("runner-name"):
-                    continue
+                    # Only include containers that have a runner-name label (actual runners)
+                    if not container.labels.get("runner-name"):
+                        continue
 
-                # Skip existing actions-runner-* containers that we should not manage
-                if container.name.startswith("actions-runner-"):
-                    logger.debug(
-                        "Ignoring existing actions-runner container",
-                        name=container.name,
+                    # Skip existing actions-runner-* containers that we should not manage
+                    if container.name.startswith("actions-runner-"):
+                        logger.debug(
+                            "Ignoring existing actions-runner container",
+                            name=container.name,
+                        )
+                        continue
+
+                    # Safely get container info - containers may disappear between list and access
+                    container.reload()  # Refresh container state
+
+                    runner_info = {
+                        "id": container.id,
+                        "name": container.name,
+                        "status": container.status,
+                        "runner_name": container.labels.get("runner-name"),
+                        "created_at": container.labels.get("created-at"),
+                        "repo_url": container.labels.get("repo-url"),
+                        "image": (
+                            container.image.tags[0]
+                            if container.image.tags
+                            else "unknown"
+                        ),
+                    }
+                    runners.append(runner_info)
+
+                except (DockerNotFound, APIError) as e:
+                    logger.warning(
+                        "Container disappeared while processing",
+                        container_id=getattr(container, "id", "unknown"),
+                        error=str(e),
                     )
+                    # Continue processing other containers
                     continue
-
-                runner_info = {
-                    "id": container.id,
-                    "name": container.name,
-                    "status": container.status,
-                    "runner_name": container.labels.get("runner-name"),
-                    "created_at": container.labels.get("created-at"),
-                    "repo_url": container.labels.get("repo-url"),
-                    "image": (
-                        container.image.tags[0] if container.image.tags else "unknown"
-                    ),
-                }
-                runners.append(runner_info)
 
             return runners
 
@@ -256,23 +271,27 @@ class DockerClient:
 
             cleaned = 0
             for container in containers:
-                # Skip existing actions-runner-* containers that we should not manage
-                if container.name.startswith("actions-runner-"):
-                    logger.debug(
-                        "Ignoring existing actions-runner container during cleanup",
-                        name=container.name,
-                    )
-                    continue
-
                 try:
-                    await self.remove_runner(container.id)
+                    # Skip existing actions-runner-* containers that we should not manage
+                    if container.name.startswith("actions-runner-"):
+                        logger.debug(
+                            "Ignoring existing actions-runner container during cleanup",
+                            name=container.name,
+                        )
+                        continue
+
+                    container_id = container.id
+                    await self.remove_runner(container_id)
                     cleaned += 1
-                except APIError as e:
-                    logger.error(
-                        "Failed to cleanup container",
-                        container_id=container.id,
+
+                except (DockerNotFound, APIError) as e:
+                    logger.warning(
+                        "Container disappeared during cleanup or failed to remove",
+                        container_id=getattr(container, "id", "unknown"),
                         error=str(e),
                     )
+                    # Continue with other containers
+                    continue
 
             if cleaned > 0:
                 logger.info("Cleaned up dead containers", count=cleaned)

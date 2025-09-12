@@ -34,6 +34,8 @@ class RunnerOrchestrator:
             "current_queue_length": 0,
             "last_scale_action": None,
             "last_poll_time": None,
+            "failed_scale_attempts": 0,  # Track consecutive failures
+            "circuit_breaker_active": False,  # Emergency brake
         }
 
     async def start(self) -> None:
@@ -80,21 +82,77 @@ class RunnerOrchestrator:
         """Monitor GitHub Actions queue and trigger scaling decisions."""
         while self.is_running:
             try:
+                # EMERGENCY SAFETY CHECK: Count all containers before any scaling decision
+                try:
+                    docker_runners = await self.docker_client.get_runners()
+                    total_containers = len(
+                        [
+                            r
+                            for r in docker_runners
+                            if r["status"] in ["running", "created", "restarting"]
+                        ]
+                    )
+
+                    # CIRCUIT BREAKER: If we have too many containers, activate emergency brake
+                    if total_containers >= settings.max_runners:
+                        if not self.metrics["circuit_breaker_active"]:
+                            logger.error(
+                                "EMERGENCY: Container limit reached, activating circuit breaker",
+                                total_containers=total_containers,
+                                max_allowed=settings.max_runners,
+                            )
+                            self.metrics["circuit_breaker_active"] = True
+
+                        # Skip all scaling operations
+                        await asyncio.sleep(settings.poll_interval)
+                        continue
+                    elif self.metrics["circuit_breaker_active"]:
+                        logger.info(
+                            "Circuit breaker deactivated, container count within limits",
+                            total_containers=total_containers,
+                            max_allowed=settings.max_runners,
+                        )
+                        self.metrics["circuit_breaker_active"] = False
+
+                except Exception as container_check_error:
+                    logger.error(
+                        "Failed container safety check",
+                        error=str(container_check_error),
+                    )
+                    # If we can't count containers, don't scale
+                    await asyncio.sleep(settings.poll_interval)
+                    continue
+
                 queue_length = await self.github_client.get_queue_length()
                 self.metrics["current_queue_length"] = queue_length
                 self.metrics["last_poll_time"] = datetime.now(timezone.utc).isoformat()
 
-                logger.debug("Queue monitoring", queue_length=queue_length)
+                logger.debug(
+                    "Queue monitoring",
+                    queue_length=queue_length,
+                    total_containers=total_containers,
+                    circuit_breaker=self.metrics["circuit_breaker_active"],
+                )
 
-                # Scale up if queue is too long
-                if queue_length >= settings.scale_up_threshold:
-                    await self._scale_up()
-                # Scale down if queue is minimal
-                elif queue_length <= settings.scale_down_threshold:
-                    await self._scale_down()
+                # Only scale if circuit breaker is not active
+                if not self.metrics["circuit_breaker_active"]:
+                    # Scale up if queue is too long
+                    if queue_length >= settings.scale_up_threshold:
+                        await self._scale_up()
+                    # Scale down if queue is minimal
+                    elif queue_length <= settings.scale_down_threshold:
+                        await self._scale_down()
 
             except Exception as e:
                 logger.error("Error monitoring queue", error=str(e))
+                self.metrics["failed_scale_attempts"] += 1
+
+                # If too many failures, activate circuit breaker
+                if self.metrics["failed_scale_attempts"] >= 5:
+                    logger.error(
+                        "Too many monitoring failures, activating circuit breaker"
+                    )
+                    self.metrics["circuit_breaker_active"] = True
 
             await asyncio.sleep(settings.poll_interval)
 
@@ -243,22 +301,48 @@ class RunnerOrchestrator:
             await asyncio.sleep(120)  # Sync more frequently - every 2 minutes
 
     async def _scale_up(self) -> None:
-        """Scale up runners based on registered runner count."""
-        # Count registered runners, not just containers
+        """Scale up runners based on both registered and docker container counts."""
+        # CRITICAL: Count ALL containers first to prevent runaway scaling
         try:
-            github_runners = await self.github_client.get_runners()
-            current_count = len(github_runners)
+            docker_runners = await self.docker_client.get_runners()
+            total_containers = len(
+                [
+                    r
+                    for r in docker_runners
+                    if r["status"] in ["running", "created", "restarting"]
+                ]
+            )
         except Exception as e:
-            logger.warning(
-                "Could not get GitHub runners for scale up, using active runners",
+            logger.error(
+                "Could not get Docker containers for scale up safety check",
                 error=str(e),
             )
-            current_count = len(self.active_runners)
+            return
 
-        if current_count >= settings.max_runners:
+        # HARD LIMIT: Never exceed max_runners containers regardless of registration status
+        if total_containers >= settings.max_runners:
             logger.warning(
-                "Cannot scale up, at maximum runners",
-                current_registered=current_count,
+                "Cannot scale up, at maximum container limit",
+                total_containers=total_containers,
+                max=settings.max_runners,
+            )
+            return
+
+        # Count registered runners for scaling logic
+        try:
+            github_runners = await self.github_client.get_runners()
+            registered_count = len(github_runners)
+        except Exception as e:
+            logger.warning(
+                "Could not get GitHub runners for scale up, using container count",
+                error=str(e),
+            )
+            registered_count = total_containers
+
+        if registered_count >= settings.max_runners:
+            logger.warning(
+                "Cannot scale up, at maximum registered runners",
+                registered_count=registered_count,
                 max=settings.max_runners,
             )
             return
@@ -273,35 +357,47 @@ class RunnerOrchestrator:
                 timestamp = last_action.get("timestamp")
                 if timestamp:
                     last_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                last_time = (
-                    datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                    if timestamp
-                    else datetime.min
-                )
+                else:
+                    last_time = datetime.min
                 time_diff = datetime.now(timezone.utc) - last_time
                 if time_diff.total_seconds() < 120:  # 2 minute cooldown
                     logger.debug("Scale up cooldown active, skipping")
                     return
 
-        # Be more conservative - only create 1-2 runners at a time instead of scale_up_threshold
-        runners_needed = min(2, settings.max_runners - current_count)
+        # SAFETY: Be very conservative - only create 1 runner at a time and respect hard limits
+        max_new_containers = min(1, settings.max_runners - total_containers)
+        max_new_registered = min(1, settings.max_runners - registered_count)
+        runners_needed = min(max_new_containers, max_new_registered)
+
+        if runners_needed <= 0:
+            logger.debug(
+                "No runners needed",
+                total_containers=total_containers,
+                registered_count=registered_count,
+            )
+            return
 
         logger.info(
             "Scaling up runners",
-            current_registered=current_count,
+            registered_count=registered_count,
+            total_containers=total_containers,
             adding=runners_needed,
         )
 
         successful_creates = 0
-        for i in range(runners_needed):
+        for _ in range(runners_needed):
             try:
                 container_id = await self._create_runner()
                 if container_id:
                     successful_creates += 1
-                    # Add a small delay between creating runners
-                    await asyncio.sleep(5)
+                    # Add a delay between creating runners
+                    await asyncio.sleep(10)  # Increased delay
+                else:
+                    logger.warning("Failed to create runner (returned None)")
+                    break  # Stop trying if creation fails
             except Exception as e:
                 logger.error("Failed to create runner during scale up", error=str(e))
+                break  # Stop trying if creation fails
 
         self.metrics["last_scale_action"] = {
             "action": "scale_up",
@@ -383,10 +479,30 @@ class RunnerOrchestrator:
         }
 
     async def _scale_to_minimum(self) -> None:
-        """Ensure minimum number of runners are running and registered."""
-        # Get both Docker containers and GitHub registered runners
-        docker_runners = await self.docker_client.get_runners()
-        running_containers = [r for r in docker_runners if r["status"] == "running"]
+        """Ensure minimum number of runners are running and registered with HARD SAFETY LIMITS."""
+        # CRITICAL: Get all Docker containers first for safety checks
+        try:
+            docker_runners = await self.docker_client.get_runners()
+            all_containers = [
+                r
+                for r in docker_runners
+                if r["status"] in ["running", "created", "restarting"]
+            ]
+            running_containers = [r for r in docker_runners if r["status"] == "running"]
+        except Exception as e:
+            logger.error(
+                "Could not get Docker containers for scaling safety", error=str(e)
+            )
+            return
+
+        # HARD SAFETY LIMIT: Never exceed max_runners containers
+        if len(all_containers) >= settings.max_runners:
+            logger.warning(
+                "Cannot scale to minimum, already at container limit",
+                total_containers=len(all_containers),
+                max=settings.max_runners,
+            )
+            return
 
         # Get registered runners from GitHub (only our managed ones)
         try:
@@ -401,6 +517,7 @@ class RunnerOrchestrator:
             logger.debug(
                 "Runner count analysis",
                 docker_running=len(running_containers),
+                docker_total=len(all_containers),
                 github_registered=len(github_runners),
                 both_running_and_registered=registered_running_count,
                 min_required=settings.min_runners,
@@ -419,39 +536,61 @@ class RunnerOrchestrator:
         needed = settings.min_runners - current_count
 
         if needed > 0:
+            # SAFETY: Respect hard container limits
+            max_containers_allowed = settings.max_runners - len(all_containers)
+            safe_needed = min(
+                needed, max_containers_allowed, 2
+            )  # Never create more than 2 at once
+
+            if safe_needed <= 0:
+                logger.warning(
+                    "Cannot scale to minimum due to container limits",
+                    needed=needed,
+                    total_containers=len(all_containers),
+                    max_allowed=settings.max_runners,
+                )
+                return
+
             logger.info(
                 "Scaling to minimum runners",
                 current_registered=current_count,
                 needed=needed,
+                safe_needed=safe_needed,
                 docker_running=len(running_containers),
+                docker_total=len(all_containers),
             )
 
-            # Limit the number of runners we try to create at once to prevent runaway
-            max_attempts = min(needed, 3)  # Don't try to create more than 3 at once
             failed_attempts = 0
+            successful_creates = 0
 
-            for i in range(max_attempts):
+            for i in range(safe_needed):
                 try:
                     runner_id = await self._create_runner()
                     if runner_id is None:
                         failed_attempts += 1
-                        if failed_attempts >= 2:  # More strict failure threshold
+                        logger.warning("Failed to create runner (returned None)")
+                        if failed_attempts >= 2:  # Strict failure threshold
                             logger.error(
                                 "Too many failed attempts to create runners, stopping"
                             )
                             break
                     else:
+                        successful_creates += 1
                         failed_attempts = 0  # Reset on success
-                        # Add delay between creates to avoid overwhelming GitHub API
-                        await asyncio.sleep(3)
+                        # Add delay between creates to avoid overwhelming systems
+                        await asyncio.sleep(10)  # Increased delay
                 except Exception as e:
                     failed_attempts += 1
                     logger.error("Failed to create minimum runner", error=str(e))
-                    if failed_attempts >= 3:
-                        logger.error(
-                            "Too many failed attempts to create runners, stopping"
-                        )
+                    if failed_attempts >= 2:  # More strict failure threshold
+                        logger.error("Too many failures, stopping scale to minimum")
                         break
+
+            logger.info(
+                "Scale to minimum completed",
+                successful_creates=successful_creates,
+                failed_attempts=failed_attempts,
+            )
 
     async def _create_runner(self) -> Optional[str]:
         """Create a new runner."""
