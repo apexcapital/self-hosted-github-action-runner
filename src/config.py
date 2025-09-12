@@ -21,6 +21,33 @@ class Settings(BaseSettings):
     )
     runner_version: str = Field("2.325.0", description="GitHub Actions runner version")
 
+    # Runner Environment Configuration
+    runner_ephemeral: bool = Field(
+        True, description="Make runners ephemeral (good for autoscaling)"
+    )
+
+    runner_labels: str = Field(
+        default="orchestrated,optimized,self-hosted,linux,x64,docker-dind",
+        description="Comma-separated labels to assign to runners",
+    )
+
+    runner_disable_automatic_deregistration: bool = Field(
+        False, description="Disable automatic deregistration on shutdown"
+    )
+    runner_unset_config_vars: bool = Field(
+        True,
+        description="Unset config vars before starting runner (prevents leaking to workflows)",
+    )
+    runner_start_docker_service: bool = Field(
+        True, description="Auto-start Docker service in runner container"
+    )
+    runner_no_default_labels: bool = Field(
+        False, description="Disable adding default self-hosted labels"
+    )
+    runner_debug_output: bool = Field(
+        False, description="Enable additional debug output in runner"
+    )
+
     # Scaling Configuration
     min_runners: int = Field(2, description="Minimum number of runners to maintain")
     max_runners: int = Field(10, description="Maximum number of runners")
@@ -42,10 +69,6 @@ class Settings(BaseSettings):
     )
     runner_network: str = Field(
         "runner-network", description="Docker network for runners"
-    )
-    runner_labels: list[str] = Field(
-        default=["docker-dind", "linux", "x64", "self-hosted", "orchestrated"],
-        description="Labels to assign to runners",
     )
 
     # Logging Configuration

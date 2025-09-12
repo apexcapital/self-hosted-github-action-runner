@@ -465,10 +465,7 @@ class RunnerOrchestrator:
 
             # Create container
             container_id = await self.docker_client.create_runner(
-                runner_name=runner_name,
-                repo_url=repo_url,
-                runner_token=token,
-                labels=settings.runner_labels,
+                runner_name=runner_name, repo_url=repo_url, runner_token=token
             )
 
             # Track the new runner

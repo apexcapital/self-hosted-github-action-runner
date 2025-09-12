@@ -41,7 +41,6 @@ class DockerClient:
         runner_name: str,
         repo_url: str,
         runner_token: str,
-        labels: Optional[List[str]] = None,
     ) -> str:
         """Create a new runner container.
 
@@ -56,17 +55,20 @@ class DockerClient:
         """
         container_name = f"{self.container_prefix}-{runner_name}-{uuid.uuid4().hex[:8]}"
 
-        # Merge default and custom labels
-        all_labels = list(settings.runner_labels)
-        if labels:
-            all_labels.extend(labels)
-
         environment = {
             "REPO_URL": repo_url,
             "RUNNER_TOKEN": runner_token,
             "RUNNER_NAME": runner_name,
             "RUNNER_WORKDIR": "_work",
-            "RUNNER_LABELS": ",".join(all_labels),
+            "RUNNER_LABELS": settings.runner_labels,
+            "EPHEMERAL": str(settings.runner_ephemeral).lower(),
+            "DISABLE_AUTOMATIC_DEREGISTRATION": str(
+                settings.runner_disable_automatic_deregistration
+            ).lower(),
+            "UNSET_CONFIG_VARS": str(settings.runner_unset_config_vars).lower(),
+            "START_DOCKER_SERVICE": str(settings.runner_start_docker_service).lower(),
+            "NO_DEFAULT_LABELS": str(settings.runner_no_default_labels).lower(),
+            "DEBUG_OUTPUT": str(settings.runner_debug_output).lower(),
         }
 
         # Create volume for runner work directory

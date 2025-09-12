@@ -148,7 +148,7 @@ deploy_orchestrator() {
     
     # Build the enhanced runner image
     print_info "Building enhanced runner image..."
-    if docker build -f Dockerfile -t ghcr.io/apexcapital/runner:latest .; then
+    if docker build -f Dockerfile -t myoung34/github-runner:latest .; then
         print_success "Enhanced runner image built successfully"
     else
         print_error "Failed to build runner image"
@@ -270,7 +270,7 @@ case "${1:-}" in
         print_header
         print_info "Cleaning up orchestrator deployment..."
         docker compose down --volumes
-        docker rmi ghcr.io/apexcapital/runner:latest 2>/dev/null || true
+        docker rmi myoung34/github-runner:latest 2>/dev/null || true
         print_success "Cleanup completed"
         ;;
     "status")
