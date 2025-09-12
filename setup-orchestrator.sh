@@ -146,12 +146,12 @@ deploy_orchestrator() {
         exit 1
     fi
     
-    # Build the enhanced runner image
-    print_info "Building enhanced runner image..."
-    if docker build -f Dockerfile -t myoung34/github-runner:latest .; then
-        print_success "Enhanced runner image built successfully"
+    # Pull the GitHub Actions runner image
+    print_info "Pulling GitHub Actions runner image..."
+    if docker pull myoung34/github-runner:latest; then
+        print_success "GitHub Actions runner image pulled successfully"
     else
-        print_error "Failed to build runner image"
+        print_error "Failed to pull runner image"
         exit 1
     fi
     

@@ -21,11 +21,6 @@ class Settings(BaseSettings):
     )
     runner_version: str = Field("2.325.0", description="GitHub Actions runner version")
 
-    # Runner Environment Configuration
-    runner_ephemeral: bool = Field(
-        True, description="Make runners ephemeral (good for autoscaling)"
-    )
-
     runner_labels: str = Field(
         default="orchestrated,optimized,self-hosted,linux,x64,docker-dind",
         description="Comma-separated labels to assign to runners",

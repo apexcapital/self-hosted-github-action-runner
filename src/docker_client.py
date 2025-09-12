@@ -61,7 +61,6 @@ class DockerClient:
             "RUNNER_NAME": runner_name,
             "RUNNER_WORKDIR": "_work",
             "RUNNER_LABELS": settings.runner_labels,
-            "EPHEMERAL": str(settings.runner_ephemeral).lower(),
             "DISABLE_AUTOMATIC_DEREGISTRATION": str(
                 settings.runner_disable_automatic_deregistration
             ).lower(),

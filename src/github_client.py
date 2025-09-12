@@ -18,7 +18,7 @@ class GitHubClient:
         """Initialize GitHub client.
 
         Args:
-            token: GitHub Personal Access Token
+            token: GitHub Personal Access Token (fine-grained supported)
             org: GitHub organization (optional)
             repo: GitHub repository in format "owner/repo" (optional)
         """
@@ -44,41 +44,101 @@ class GitHubClient:
         self.headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json",
+            # Pin API version for consistent behavior across fine-grained PATs
+            "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "GitHub-Actions-Runner-Orchestrator/2.0.0",
         }
 
     async def validate_token(self) -> bool:
-        """Validate the GitHub token and permissions."""
+        """
+        Validate the GitHub token and required permissions.
+
+        Strategy (works for fine-grained org admin tokens):
+          1) GET /user -> verifies token is valid.
+          2) GET org/repo -> verifies the resource is visible to this token.
+          3) GET {runners_url} -> verifies read access to self-hosted runners.
+          4) POST {registration_url} -> verifies write/admin permission for runner management.
+             (Returns a short-lived registration token; safe to create and discard.)
+        """
         try:
-            async with httpx.AsyncClient() as client:
-                # Test basic authentication
-                auth_response = await client.get(
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                # 1) Token validity
+                user_resp = await client.get(
                     f"{self.base_url}/user", headers=self.headers
                 )
-                auth_response.raise_for_status()
+                user_resp.raise_for_status()
 
-                # Test access to the specific org/repo
-                test_response = await client.get(self.runners_url, headers=self.headers)
-                test_response.raise_for_status()
+                # 2) Resource visibility
+                if self.org:
+                    res_resp = await client.get(
+                        f"{self.base_url}/orgs/{self.org}", headers=self.headers
+                    )
+                else:
+                    owner_repo = (self.repo or "").strip()
+                    if "/" not in owner_repo:
+                        raise ValueError("repo must be in 'owner/repo' format")
+                    res_resp = await client.get(
+                        f"{self.base_url}/repos/{owner_repo}", headers=self.headers
+                    )
+                res_resp.raise_for_status()
+
+                # 3) Read access to runners list
+                runners_read = await client.get(self.runners_url, headers=self.headers)
+                runners_read.raise_for_status()
+
+                # 4) Write/admin permission to issue a registration token
+                reg_resp = await client.post(
+                    self.registration_url, headers=self.headers
+                )
+                reg_resp.raise_for_status()
+
+                # Minimal sanity check the returned payload (shape varies, but "token" should exist)
+                data = reg_resp.json()
+                if not isinstance(data, dict) or "token" not in data:
+                    logger.error("Unexpected registration-token response payload")
+                    raise Exception(
+                        "Unexpected GitHub response while validating token permissions"
+                    )
 
                 logger.info("GitHub token validation successful")
                 return True
+
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                logger.error("GitHub token is invalid or expired")
-                raise Exception("Invalid GitHub token")
-            elif e.response.status_code == 403:
-                logger.error("GitHub token lacks required permissions")
-                raise Exception("Insufficient GitHub token permissions")
-            elif e.response.status_code == 404:
-                logger.error("Organization or repository not found")
-                raise Exception("Organization or repository not found")
-            else:
-                logger.error(
-                    "GitHub API error during validation",
-                    status_code=e.response.status_code,
+            code = e.response.status_code
+            # Attempt to surface GitHub's error message for debugging
+            try:
+                detail = e.response.json().get("message", "")
+            except Exception:
+                detail = e.response.text or ""
+            context = {"status_code": code, "detail": detail}
+
+            if code == 401:
+                logger.error("Invalid or expired GitHub token", **context)
+                raise Exception("Invalid or expired GitHub token")
+            if code == 403:
+                # 403s here typically indicate insufficient fine-grained permissions for the resource or action.
+                logger.error("GitHub token lacks required permissions", **context)
+                raise Exception(
+                    "Insufficient GitHub token permissions for runner management"
                 )
-                raise Exception(f"GitHub API error: {e.response.status_code}")
+            if code == 404:
+                # 404 can mean the org/repo is not visible to the token (or truly doesn't exist)
+                logger.error(
+                    "Organization or repository not found or not visible", **context
+                )
+                raise Exception(
+                    "Organization or repository not found or not visible to the token"
+                )
+            if code == 422:
+                # Unprocessable (rare here but can happen on malformed inputs)
+                logger.error(
+                    "Unprocessable GitHub request during validation", **context
+                )
+                raise Exception(
+                    "GitHub request could not be processed during validation"
+                )
+            logger.error("GitHub API error during validation", **context)
+            raise Exception(f"GitHub API error during validation: {code}")
         except Exception as e:
             logger.error("GitHub token validation failed", error=str(e))
             raise Exception(f"Token validation failed: {e}")
@@ -88,7 +148,7 @@ class GitHubClient:
     )
     async def get_registration_token(self) -> str:
         """Get a registration token for new runners."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             response = await client.post(self.registration_url, headers=self.headers)
             response.raise_for_status()
             data = response.json()
@@ -99,7 +159,7 @@ class GitHubClient:
     )
     async def get_all_runners(self) -> List[Dict[str, Any]]:
         """Get list of ALL runners including actions-runner-* ones we don't manage."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             response = await client.get(self.runners_url, headers=self.headers)
             response.raise_for_status()
             data = response.json()
@@ -110,7 +170,7 @@ class GitHubClient:
     )
     async def get_runners(self) -> List[Dict[str, Any]]:
         """Get list of all runners, excluding actions-runner-* runners from management."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             response = await client.get(self.runners_url, headers=self.headers)
             response.raise_for_status()
             data = response.json()
@@ -149,7 +209,7 @@ class GitHubClient:
             url = f"{self.base_url}/repos/{self.repo}/actions/runs"
             params = {"status": status, "per_page": 100}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 response = await client.get(url, headers=self.headers, params=params)
                 response.raise_for_status()
                 data = response.json()
@@ -161,7 +221,7 @@ class GitHubClient:
     async def delete_runner(self, runner_id: int) -> bool:
         """Delete a runner."""
         url = f"{self.runners_url}/{runner_id}"
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             response = await client.delete(url, headers=self.headers)
             if response.status_code == 204:
                 return True
