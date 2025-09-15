@@ -353,25 +353,35 @@ main() {
 case "${1:-}" in
     "cleanup")
         print_header
-        print_info "Cleaning up orchestrator deployment..."
-        # Deregister orchestrated runners from GitHub first
-        deregister_github_runners
+            print_info "Cleaning up orchestrator deployment..."
+            # Deregister orchestrated runners from GitHub first
+            deregister_github_runners
 
-        # Then stop/remove runner containers managed by the orchestrator
-        print_info "Stopping and removing orchestrated runner containers..."
-        managed_containers=$(docker ps -q --filter "name=github-runner-orchestrated" 2>/dev/null || true)
-        if [[ -n "$managed_containers" ]]; then
-            docker stop $managed_containers || true
-            docker rm $managed_containers || true
-            print_success "Stopped and removed orchestrated runner containers"
-        else
-            print_success "No orchestrated runner containers found"
-        fi
+            # Stop orchestrator services first so it doesn't recreate runners
+            print_info "Stopping orchestrator services..."
+            docker compose down --remove-orphans --volumes || true
 
-        # Tear down orchestrator services and volumes
-        docker compose down --volumes
-        docker rmi apex-runner:local 2>/dev/null || true
-        print_success "Cleanup completed"
+            # Then stop/remove runner containers managed by the orchestrator (by label)
+            print_info "Stopping and removing orchestrated runner containers..."
+            managed_containers=$(docker ps -a -q --filter "label=managed-by=runner-orchestrator" 2>/dev/null || true)
+            if [[ -n "$managed_containers" ]]; then
+                docker stop $managed_containers || true
+                docker rm -v $managed_containers || true
+
+                # Remove any named volumes created for runners (work volumes)
+                managed_vols=$(docker volume ls -q --filter "label=managed-by=runner-orchestrator" 2>/dev/null || true)
+                if [[ -n "$managed_vols" ]]; then
+                    docker volume rm $managed_vols || true
+                fi
+
+                print_success "Stopped and removed orchestrated runner containers and volumes"
+            else
+                print_success "No orchestrated runner containers found"
+            fi
+
+            # Remove locally built runner image if present
+            docker rmi apex-runner:local 2>/dev/null || true
+            print_success "Cleanup completed"
         ;;
     "status")
         show_status
