@@ -270,12 +270,16 @@ deregister_github_runners() {
         done < .env
     fi
 
-    # Determine API base and auth
-    if [[ -n "${ORCHESTRATOR_GITHUB_REPO:-}" && "${ORCHESTRATOR_GITHUB_REPO}" != "owner/repository-name" ]]; then
+    # Determine API base and auth (use safe expansions to avoid set -u failures)
+    if [[ -n "${ORCHESTRATOR_GITHUB_REPO:-}" && "${ORCHESTRATOR_GITHUB_REPO:-}" != "owner/repository-name" ]]; then
         # repo scope
-        API_BASE="https://api.github.com/repos/${ORCHESTRATOR_GITHUB_REPO}"
+        API_BASE="https://api.github.com/repos/${ORCHESTRATOR_GITHUB_REPO:-}"
+    elif [[ -n "${ORCHESTRATOR_GITHUB_ORG:-}" && "${ORCHESTRATOR_GITHUB_ORG:-}" != "your-github-organization" ]]; then
+        # org scope
+        API_BASE="https://api.github.com/orgs/${ORCHESTRATOR_GITHUB_ORG:-}"
     else
-        API_BASE="https://api.github.com/orgs/${ORCHESTRATOR_GITHUB_ORG}"
+        print_warning "Neither ORCHESTRATOR_GITHUB_REPO nor ORCHESTRATOR_GITHUB_ORG set in .env; skipping GitHub deregistration"
+        return
     fi
 
     if [[ -z "${ORCHESTRATOR_GITHUB_TOKEN:-}" || "${ORCHESTRATOR_GITHUB_TOKEN}" == "your_github_personal_access_token_here" ]]; then
@@ -358,8 +362,26 @@ case "${1:-}" in
             deregister_github_runners
 
             # Stop orchestrator services first so it doesn't recreate runners
-            print_info "Stopping orchestrator services..."
+            print_info "Stopping orchestrator services (docker compose down)…"
             docker compose down --remove-orphans --volumes || true
+
+            # If the orchestrator container still exists (compose mismatch or started elsewhere), stop/remove it explicitly
+            orch_containers=$(docker ps -a -q --filter "label=component=orchestrator" --filter "label=managed-by=runner-orchestrator" 2>/dev/null || true)
+            if [[ -z "$orch_containers" ]]; then
+                # Try by common container name
+                if docker ps -a --format '{{.Names}}' | grep -q '^orchestrator$'; then
+                    orch_containers=$(docker ps -a -q --filter "name=^orchestrator$")
+                fi
+            fi
+
+            if [[ -n "$orch_containers" ]]; then
+                print_warning "Found running orchestrator container(s); stopping and removing explicitly..."
+                docker stop $orch_containers || true
+                docker rm -v $orch_containers || true
+                print_success "Orchestrator container(s) stopped and removed"
+            else
+                print_info "No standalone orchestrator container found after compose down"
+            fi
 
             # Then stop/remove runner containers managed by the orchestrator (by label)
             print_info "Stopping and removing orchestrated runner containers..."
