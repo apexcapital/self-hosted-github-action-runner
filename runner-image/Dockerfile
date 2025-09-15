@@ -49,18 +49,7 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
-    # Try to install ansible package from Debian first (preferred). If not present
-    # users can still install additional collections via ansible-galaxy.
-    ansible \
  && rm -rf /var/lib/apt/lists/*
-
-# Install AWX CLI (awxkit) into an isolated virtualenv to avoid system pip
-# restrictions (PEP 668). The awx executable will be symlinked into
-# /usr/local/bin for convenience.
-RUN python3 -m venv /opt/awx \
- && /opt/awx/bin/pip install --upgrade pip setuptools wheel \
- && /opt/awx/bin/pip install --no-cache-dir awxkit \
- && ln -s /opt/awx/bin/awx /usr/local/bin/awx || true
 
 # Non-root user
 RUN groupadd -r actions \
