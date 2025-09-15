@@ -53,92 +53,151 @@ class GitHubClient:
         """
         Validate the GitHub token and required permissions.
 
-        Strategy (works for fine-grained org admin tokens):
-          1) GET /user -> verifies token is valid.
-          2) GET org/repo -> verifies the resource is visible to this token.
-          3) GET {runners_url} -> verifies read access to self-hosted runners.
-          4) POST {registration_url} -> verifies write/admin permission for runner management.
-             (Returns a short-lived registration token; safe to create and discard.)
+        Org flow (unchanged order, strict -> lenient):
+          1) GET /user
+          2) GET /orgs/{org}
+          3) GET /orgs/{org}/actions/runners
+          4) POST /orgs/{org}/actions/runners/registration-token
+
+        Repo flow (re-ordered to avoid false 403s on runner listing):
+          1) GET /user
+          2) GET /repos/{owner}/{repo}
+          3) POST /repos/{owner}/{repo}/actions/runners/registration-token  <-- strict
+          4) (Optional) GET /repos/{owner}/{repo}/actions/runners           <-- informative only
         """
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-                # 1) Token validity
-                user_resp = await client.get(
-                    f"{self.base_url}/user", headers=self.headers
-                )
-                user_resp.raise_for_status()
 
-                # 2) Resource visibility
-                if self.org:
-                    res_resp = await client.get(
-                        f"{self.base_url}/orgs/{self.org}", headers=self.headers
-                    )
-                else:
-                    owner_repo = (self.repo or "").strip()
-                    if "/" not in owner_repo:
-                        raise ValueError("repo must be in 'owner/repo' format")
-                    res_resp = await client.get(
-                        f"{self.base_url}/repos/{owner_repo}", headers=self.headers
-                    )
-                res_resp.raise_for_status()
-
-                # 3) Read access to runners list
-                runners_read = await client.get(self.runners_url, headers=self.headers)
-                runners_read.raise_for_status()
-
-                # 4) Write/admin permission to issue a registration token
-                reg_resp = await client.post(
-                    self.registration_url, headers=self.headers
-                )
-                reg_resp.raise_for_status()
-
-                # Minimal sanity check the returned payload (shape varies, but "token" should exist)
-                data = reg_resp.json()
-                if not isinstance(data, dict) or "token" not in data:
-                    logger.error("Unexpected registration-token response payload")
-                    raise Exception(
-                        "Unexpected GitHub response while validating token permissions"
-                    )
-
-                logger.info("GitHub token validation successful")
-                return True
-
-        except httpx.HTTPStatusError as e:
+        def _raise_perm(method: str, url: str, e: httpx.HTTPStatusError) -> None:
             code = e.response.status_code
-            # Attempt to surface GitHub's error message for debugging
             try:
                 detail = e.response.json().get("message", "")
             except Exception:
                 detail = e.response.text or ""
-            context = {"status_code": code, "detail": detail}
-
+            logger.error(
+                "GitHub API error during validation",
+                method=method,
+                url=url,
+                status_code=code,
+                detail=detail,
+            )
             if code == 401:
-                logger.error("Invalid or expired GitHub token", **context)
                 raise Exception("Invalid or expired GitHub token")
             if code == 403:
-                # 403s here typically indicate insufficient fine-grained permissions for the resource or action.
-                logger.error("GitHub token lacks required permissions", **context)
                 raise Exception(
                     "Insufficient GitHub token permissions for runner management"
                 )
             if code == 404:
-                # 404 can mean the org/repo is not visible to the token (or truly doesn't exist)
-                logger.error(
-                    "Organization or repository not found or not visible", **context
-                )
                 raise Exception(
                     "Organization or repository not found or not visible to the token"
                 )
             if code == 422:
-                # Unprocessable (rare here but can happen on malformed inputs)
-                logger.error(
-                    "Unprocessable GitHub request during validation", **context
-                )
                 raise Exception(
                     "GitHub request could not be processed during validation"
                 )
-            logger.error("GitHub API error during validation", **context)
             raise Exception(f"GitHub API error during validation: {code}")
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                # 1) Token validity
+                url = f"{self.base_url}/user"
+                try:
+                    resp = await client.get(url, headers=self.headers)
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    _raise_perm("GET", url, e)
+
+                # Branch by target type
+                if self.org:
+                    # 2) Org visibility
+                    url = f"{self.base_url}/orgs/{self.org}"
+                    try:
+                        resp = await client.get(url, headers=self.headers)
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        _raise_perm("GET", url, e)
+
+                    # 3) Read access to runners list (org)
+                    url = self.runners_url  # /orgs/{org}/actions/runners
+                    try:
+                        resp = await client.get(url, headers=self.headers)
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        _raise_perm("GET", url, e)
+
+                    # 4) Write/admin permission: create registration token (org)
+                    url = (
+                        self.registration_url
+                    )  # /orgs/{org}/actions/runners/registration-token
+                    try:
+                        resp = await client.post(url, headers=self.headers)
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        _raise_perm("POST", url, e)
+
+                    data = resp.json()
+                    if not isinstance(data, dict) or "token" not in data:
+                        logger.error(
+                            "Unexpected registration-token response payload (org)"
+                        )
+                        raise Exception(
+                            "Unexpected GitHub response while validating token permissions"
+                        )
+
+                    logger.info("GitHub token validation successful (org)")
+                    return True
+
+                # Repo flow
+                owner_repo = (self.repo or "").strip()
+                if "/" not in owner_repo:
+                    raise ValueError("repo must be in 'owner/repo' format")
+                owner, repo = owner_repo.split("/", 1)
+
+                # 2) Repo visibility
+                url = f"{self.base_url}/repos/{owner}/{repo}"
+                try:
+                    resp = await client.get(url, headers=self.headers)
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    _raise_perm("GET", url, e)
+
+                # 3) STRICT: can we mint a registration token at repo scope?
+                # (This is the most authoritative check for runner admin on the repo
+                #  and avoids misleading 403s that sometimes occur when listing runners.)
+                url = (
+                    self.registration_url
+                )  # /repos/{owner}/{repo}/actions/runners/registration-token
+                try:
+                    reg_resp = await client.post(url, headers=self.headers)
+                    reg_resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    _raise_perm("POST", url, e)
+
+                data = reg_resp.json()
+                if not isinstance(data, dict) or "token" not in data:
+                    logger.error(
+                        "Unexpected registration-token response payload (repo)"
+                    )
+                    raise Exception(
+                        "Unexpected GitHub response while validating token permissions"
+                    )
+
+                # 4) Optional: read runners list for diagnostics; ignore failures here
+                # Some fine-grained PATs can create registration tokens but still 403 on list
+                # if "Self-hosted runners: Read" wasn't granted. That shouldn't fail validation.
+                url = self.runners_url  # /repos/{owner}/{repo}/actions/runners
+                try:
+                    runners_read = await client.get(url, headers=self.headers)
+                    runners_read.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    logger.warning(
+                        "Repo runners list not readable with this token (continuing)",
+                        method="GET",
+                        url=url,
+                        status_code=e.response.status_code,
+                    )
+
+                logger.info("GitHub token validation successful (repo)")
+                return True
+
         except Exception as e:
             logger.error("GitHub token validation failed", error=str(e))
             raise Exception(f"Token validation failed: {e}")

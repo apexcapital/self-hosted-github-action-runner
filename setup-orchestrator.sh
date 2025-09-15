@@ -37,6 +37,21 @@ print_info() {
     echo -e "${BLUE}ℹ️  $1${NC}"
 }
 
+# Portable function to set or add KEY=VALUE in .env (works on macOS and Linux)
+set_env_var() {
+    key="$1"
+    val="$2"
+    file=".env"
+
+    # Ensure .env exists
+    if [[ ! -f "$file" ]]; then
+        touch "$file"
+    fi
+
+    # Use awk to replace the line if it exists, otherwise append
+    awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v;found=1} {print} END{if(!found) print k"="v}' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+}
+
 # Check prerequisites
 check_prerequisites() {
     print_info "Checking prerequisites..."
@@ -91,8 +106,7 @@ setup_environment() {
         echo
         
         if [[ -n "$github_token" ]]; then
-            sed -i.bak "s/^ORCHESTRATOR_GITHUB_TOKEN=.*/ORCHESTRATOR_GITHUB_TOKEN=$github_token/" .env
-            rm -f .env.bak
+            set_env_var "ORCHESTRATOR_GITHUB_TOKEN" "$github_token"
             print_success "GitHub token configured"
         else
             print_warning "No token provided. Please edit .env manually"
@@ -112,16 +126,14 @@ setup_environment() {
                 1)
                     read -p "Enter your GitHub organization name: " org_name
                     if [[ -n "$org_name" ]]; then
-                        sed -i.bak "s/^ORCHESTRATOR_GITHUB_ORG=.*/ORCHESTRATOR_GITHUB_ORG=$org_name/" .env
-                        rm -f .env.bak
+                        set_env_var "ORCHESTRATOR_GITHUB_ORG" "$org_name"
                         print_success "Organization configured: $org_name"
                     fi
                     ;;
                 2)
                     read -p "Enter repository (format: owner/repo): " repo_name
                     if [[ -n "$repo_name" ]]; then
-                        sed -i.bak "s/^ORCHESTRATOR_GITHUB_REPO=.*/ORCHESTRATOR_GITHUB_REPO=$repo_name/" .env
-                        rm -f .env.bak
+                        set_env_var "ORCHESTRATOR_GITHUB_REPO" "$repo_name"
                         print_success "Repository configured: $repo_name"
                     fi
                     ;;
