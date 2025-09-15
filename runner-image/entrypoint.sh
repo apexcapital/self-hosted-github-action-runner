@@ -42,9 +42,9 @@ start_dind() {
     exit 1
   fi
 
-  # Ensure 'docker' group exists and 'actions' can access the socket
-  getent group docker >/dev/null 2>&1 || groupadd -r docker
-  usermod -aG docker actions || true
+  # After dockerd starts, ensure the 'actions' user is in the group that owns
+  # the Docker socket so it can connect to the daemon. We handle variable
+  # GIDs from the host by creating a group with the socket GID when needed.
 
   echo "▶ Starting dockerd (DinD)…"
   dockerd \
@@ -61,6 +61,7 @@ start_dind() {
   for i in {1..60}; do
     if docker version >/dev/null 2>&1; then
       echo "✔ dockerd is ready"
+      ensure_docker_socket_access || true
       return 0
     fi
     sleep 1
@@ -68,6 +69,33 @@ start_dind() {
   echo "✖ timed out waiting for dockerd; last 200 lines:" >&2
   tail -n 200 /var/log/dockerd.log || true
   exit 1
+}
+
+# Ensure the actions user can talk to Docker via the mounted socket. If the
+# socket exists, find its group id (GID) and create/add a group with that GID
+# so the 'actions' user may be added to it. This handles the common pattern of
+# bind-mounting /var/run/docker.sock from the host (where the socket GID may
+# not be the same as the 'docker' group inside the image).
+ensure_docker_socket_access() {
+  if [[ -S "/var/run/docker.sock" ]]; then
+    # Get gid of socket
+    socket_gid=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+    if [[ -n "$socket_gid" ]]; then
+      # If a group already exists with that gid, use it. Otherwise create one.
+      existing_grp=$(getent group "${socket_gid}" | cut -d: -f1 || true)
+      if [[ -n "$existing_grp" ]]; then
+        docker_grp="$existing_grp"
+      else
+        # create a group named docker-host-GID to avoid collisions
+        docker_grp="docker-host-${socket_gid}"
+        groupadd -g "$socket_gid" "$docker_grp" || true
+      fi
+
+      # Add actions user to the group
+      usermod -aG "$docker_grp" actions || true
+      echo "Added user 'actions' to group $docker_grp (gid=$socket_gid)"
+    fi
+  fi
 }
 
 stop_dind() {
