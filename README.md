@@ -83,6 +83,11 @@ cp .env.example .env
 # Edit .env with your settings
 
 # Build and start the orchestrator
+# (Optional) Build the custom runner image used by the orchestrator and then start services
+# Build using the repository root as the build context so files like `daemon.json`
+# (located at the repo root) are available to the Dockerfile. The Dockerfile is
+# taken from `runner-image/Dockerfile`.
+docker build -t apex-runner:local -f runner-image/Dockerfile . || true
 docker compose up -d --build
 ```
 
@@ -196,7 +201,16 @@ Configure custom labels for your runners:
 
 ```yaml
 environment:
-  ORCHESTRATOR_RUNNER_LABELS: "docker-dind,linux,x64,self-hosted,my-custom-label"
+  ORCHESTRATOR_RUNNER_LABELS: "docker-dind,linux,self-hosted,my-custom-label"
+
+### Customizing the Runner Image
+
+This project now builds and uses a local runner image by default (`apex-runner:local`).
+You can customize the runner image by editing `runner-image/Dockerfile` and adding
+any packages or tools your workflows need. The `setup-orchestrator.sh` script will
+attempt to build `apex-runner:local` from `runner-image/` during setup. If you prefer
+to use a remote image, set `ORCHESTRATOR_RUNNER_IMAGE` in `.env` to the desired
+image (e.g. `ghcr.io/yourorg/runner:tag`).
 ```
 
 ### Distributed Setup

@@ -146,13 +146,19 @@ deploy_orchestrator() {
         exit 1
     fi
     
-    # Pull the GitHub Actions runner image
-    print_info "Pulling GitHub Actions runner image..."
-    if docker pull myoung34/github-runner:latest; then
-        print_success "GitHub Actions runner image pulled successfully"
+    # Build the custom runner image from runner-image/Dockerfile
+    if [[ -f runner-image/Dockerfile ]]; then
+        print_info "Building custom runner image apex-runner:local..."
+        # Build from repository root so files like ./daemon.json (repo root)
+        # are available to the Docker build via the build context.
+        if docker build -t apex-runner:local -f runner-image/Dockerfile .; then
+            print_success "Custom runner image built successfully"
+        else
+            print_error "Failed to build custom runner image"
+            exit 1
+        fi
     else
-        print_error "Failed to pull runner image"
-        exit 1
+        print_warning "No runner-image/Dockerfile found, assuming ORCHESTRATOR_RUNNER_IMAGE is set"
     fi
     
     # Deploy the orchestrator
@@ -231,6 +237,85 @@ cleanup_old_system() {
     fi
 }
 
+# Deregister orchestrated runners from GitHub (organization or repo scope)
+deregister_github_runners() {
+    print_info "Deregistering orchestrated runners from GitHub..."
+
+    # Load only the specific env vars we need (safe parsing, allows comments/complex .env)
+    if [[ -f .env ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # skip comments and blank lines
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$line" ]] && continue
+
+            key="${line%%=*}"
+            val="${line#*=}"
+
+            case "$key" in
+                ORCHESTRATOR_GITHUB_TOKEN|ORCHESTRATOR_GITHUB_ORG|ORCHESTRATOR_GITHUB_REPO|ORCHESTRATOR_RUNNER_PREFIX)
+                    # trim leading/trailing whitespace
+                    val="${val#${val%%[![:space:]]*}}"
+                    val="${val%${val##*[![:space:]]}}"
+
+                    # remove surrounding single or double quotes
+                    first_char="${val:0:1}"
+                    last_char="${val:$((${#val}-1)):1}"
+                    if [[ ( "$first_char" == '"' && "$last_char" == '"' ) || ( "$first_char" == "'" && "$last_char" == "'" ) ]]; then
+                        val="${val:1:$((${#val}-2))}"
+                    fi
+
+                    export "$key"="$val"
+                    ;;
+            esac
+        done < .env
+    fi
+
+    # Determine API base and auth
+    if [[ -n "${ORCHESTRATOR_GITHUB_REPO:-}" && "${ORCHESTRATOR_GITHUB_REPO}" != "owner/repository-name" ]]; then
+        # repo scope
+        API_BASE="https://api.github.com/repos/${ORCHESTRATOR_GITHUB_REPO}"
+    else
+        API_BASE="https://api.github.com/orgs/${ORCHESTRATOR_GITHUB_ORG}"
+    fi
+
+    if [[ -z "${ORCHESTRATOR_GITHUB_TOKEN:-}" || "${ORCHESTRATOR_GITHUB_TOKEN}" == "your_github_personal_access_token_here" ]]; then
+        print_warning "No valid ORCHESTRATOR_GITHUB_TOKEN found in .env; skipping GitHub deregistration"
+        return
+    fi
+
+    PREFIX="${ORCHESTRATOR_RUNNER_PREFIX:-orchestrated}"
+
+    # Fetch runners
+    runners_response=$(curl -s -H "Authorization: token ${ORCHESTRATOR_GITHUB_TOKEN}" "${API_BASE}/actions/runners")
+    runner_ids=$(echo "$runners_response" | python3 -c "import sys, json; data=json.load(sys.stdin); print(' '.join([str(r['id'])+','+r['name'] for r in data.get('runners',[])]))")
+
+    if [[ -z "$runner_ids" ]]; then
+        print_success "No runners found in GitHub for deregistration"
+        return
+    fi
+
+    # Iterate over runners and delete those matching the prefix
+    IFS=' ' read -r -a arr <<< "$runner_ids"
+    deleted=0
+    for item in "${arr[@]}"; do
+        id=${item%%,*}
+        name=${item#*,}
+        if [[ "$name" == ${PREFIX}* ]]; then
+            print_info "Deregistering runner: $name (id: $id)"
+            # Attempt delete
+            del_resp=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: token ${ORCHESTRATOR_GITHUB_TOKEN}" "${API_BASE}/actions/runners/${id}")
+            if [[ "$del_resp" == "204" ]]; then
+                print_success "Deregistered $name"
+                deleted=$((deleted+1))
+            else
+                print_warning "Failed to deregister $name (http status $del_resp)"
+            fi
+        fi
+    done
+
+    print_info "Deregistered $deleted orchestrated runners (if any)"
+}
+
 # Main setup flow
 main() {
     print_header
@@ -269,8 +354,23 @@ case "${1:-}" in
     "cleanup")
         print_header
         print_info "Cleaning up orchestrator deployment..."
+        # Deregister orchestrated runners from GitHub first
+        deregister_github_runners
+
+        # Then stop/remove runner containers managed by the orchestrator
+        print_info "Stopping and removing orchestrated runner containers..."
+        managed_containers=$(docker ps -q --filter "name=github-runner-orchestrated" 2>/dev/null || true)
+        if [[ -n "$managed_containers" ]]; then
+            docker stop $managed_containers || true
+            docker rm $managed_containers || true
+            print_success "Stopped and removed orchestrated runner containers"
+        else
+            print_success "No orchestrated runner containers found"
+        fi
+
+        # Tear down orchestrator services and volumes
         docker compose down --volumes
-        docker rmi myoung34/github-runner:latest 2>/dev/null || true
+        docker rmi apex-runner:local 2>/dev/null || true
         print_success "Cleanup completed"
         ;;
     "status")

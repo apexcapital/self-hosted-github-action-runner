@@ -219,15 +219,20 @@ class RunnerOrchestrator:
 
                 # Also get all runners for logging/monitoring purposes
                 all_github_runners = await self.github_client.get_all_runners()
+                # Determine which existing GitHub runners we should ignore when
+                # syncing. Historically we ignored names like "actions-runner-*"
+                # and "Mac-Build-*". Use the configured prefix so the
+                # orchestrator only manages runners it created.
+                configured_prefix = settings.runner_name_prefix
                 ignored_runners = [
                     r["name"]
                     for r in all_github_runners
-                    if r["name"].startswith("actions-runner-")
+                    if not r["name"].startswith(configured_prefix)
                 ]
 
                 if ignored_runners:
                     logger.debug(
-                        "Found existing actions-runner-* runners (ignoring)",
+                        "Found existing non-orchestrated runners (ignoring)",
                         count=len(ignored_runners),
                         names=ignored_runners[:5],  # Log first 5 names to avoid spam
                     )
@@ -280,8 +285,18 @@ class RunnerOrchestrator:
                     logger.info(
                         "Found orphaned runners in GitHub", count=len(orphaned_github)
                     )
+                    prefix = settings.runner_name_prefix
                     for runner in github_runners:
                         if runner["name"] in orphaned_github:
+                            # Only remove runners that match our naming prefix to avoid
+                            # deleting unrelated runners (e.g., Mac build agents).
+                            if not runner["name"].startswith(prefix):
+                                logger.info(
+                                    "Skipping orphaned runner - not managed by this orchestrator",
+                                    name=runner["name"],
+                                )
+                                continue
+
                             try:
                                 await self.github_client.delete_runner(runner["id"])
                                 logger.info(
@@ -660,10 +675,12 @@ class RunnerOrchestrator:
         try:
             all_github_runners = await self.github_client.get_all_runners()
             github_runners = await self.github_client.get_runners()  # Only managed ones
+            # Report runners that are not managed by this orchestrator for monitoring
+            configured_prefix = settings.runner_name_prefix
             ignored_runners = [
                 r["name"]
                 for r in all_github_runners
-                if r["name"].startswith("actions-runner-")
+                if not r["name"].startswith(configured_prefix)
             ]
 
             # Calculate registered vs unregistered containers

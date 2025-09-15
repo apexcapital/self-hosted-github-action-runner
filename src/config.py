@@ -17,12 +17,12 @@ class Settings(BaseSettings):
 
     # Runner Configuration
     runner_image: str = Field(
-        "ghcr.io/apexcapital/runner:latest", description="Docker image for runners"
+        "apex-runner:local", description="Docker image for runners"
     )
     runner_version: str = Field("2.325.0", description="GitHub Actions runner version")
 
     runner_labels: str = Field(
-        default="orchestrated,optimized,self-hosted,linux,x64,docker-dind",
+        default="orchestrated,optimized,self-hosted,linux,docker-dind",
         description="Comma-separated labels to assign to runners",
     )
 
@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     )
     runner_network: str = Field(
         "runner-network", description="Docker network for runners"
+    )
+    # Container naming prefix the orchestrator uses for created runner containers
+    runner_name_prefix: str = Field(
+        "github-runner", description="Prefix used for runner container names"
     )
 
     # Logging Configuration
