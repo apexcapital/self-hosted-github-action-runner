@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG RUNNER_VERSION=2.325.0
+ARG RUNNER_VERSION=2.328.0
 ARG BASE_IMAGE=debian:bookworm-slim
 ARG TARGETARCH
 
