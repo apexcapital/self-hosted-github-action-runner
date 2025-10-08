@@ -91,18 +91,8 @@ ENV PATH="/sbin:/usr/sbin:${PATH}"
 ENV CI=true \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Preinstall Playwright CLI and browsers into a shared, versioned cache
+# Prepare Playwright dirs
 RUN mkdir -p /ms-playwright && chown -R actions:actions /ms-playwright
-
-USER actions
-WORKDIR /home/actions
-
-# Pin or float Playwright; pin for reproducibility
-RUN npm -g install playwright@latest \
- && npx playwright install chromium firefox webkit \
- && npx playwright install --check-deps
-
-USER root
 
 # DinD state (optional)
 VOLUME ["/var/lib/docker"]
