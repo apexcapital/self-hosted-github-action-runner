@@ -57,6 +57,7 @@ class RunnerOrchestrator:
             asyncio.create_task(self._manage_runners()),
             asyncio.create_task(self._cleanup_dead_containers()),
             asyncio.create_task(self._sync_runners()),
+            asyncio.create_task(self._monitor_runner_utilization()),
         ]
 
         # Initialize minimum runners
@@ -133,6 +134,7 @@ class RunnerOrchestrator:
                     total_containers=total_containers,
                     circuit_breaker=self.metrics["circuit_breaker_active"],
                 )
+                await self.debug_scaling_state()  # Debug call
 
                 # Only scale if circuit breaker is not active
                 if not self.metrics["circuit_breaker_active"]:
@@ -375,13 +377,21 @@ class RunnerOrchestrator:
                 else:
                     last_time = datetime.min
                 time_diff = datetime.now(timezone.utc) - last_time
-                if time_diff.total_seconds() < 120:  # 2 minute cooldown
+                if time_diff.total_seconds() < 60:
                     logger.debug("Scale up cooldown active, skipping")
                     return
 
-        # SAFETY: Be very conservative - only create 1 runner at a time and respect hard limits
-        max_new_containers = min(1, settings.max_runners - total_containers)
-        max_new_registered = min(1, settings.max_runners - registered_count)
+        # Be more aggressive in scaling - create up to 2 runners at once if needed
+        docker_runners = await self.docker_client.get_runners()
+        total_containers = len(
+            [
+                r for r in docker_runners if r["status"] in ["running", "created", "restarting"]
+            ]
+        )
+        github_runners = await self.github_client.get_runners()
+        registered_count = len(github_runners)
+        max_new_containers = min(2, settings.max_runners - total_containers)
+        max_new_registered = min(2, settings.max_runners - registered_count)
         runners_needed = min(max_new_containers, max_new_registered)
 
         if runners_needed <= 0:
@@ -640,6 +650,65 @@ class RunnerOrchestrator:
         except Exception as e:
             logger.error("Failed to create runner", error=str(e))
             return None
+
+    async def _monitor_runner_utilization(self) -> None:
+        """Monitor runner utilization and scale based on usage."""
+        while self.is_running:
+            try:
+                github_runners = await self.github_client.get_runners()
+                total_runners = len(github_runners)
+                busy_runners = len([r for r in github_runners if r.get("status") == "online" and r.get("busy", False)])
+                idle_runners = total_runners - busy_runners
+                utilization = (busy_runners / total_runners * 100) if total_runners > 0 else 0
+                logger.debug(
+                    "Runner utilization check",
+                    total_runners=total_runners,
+                    busy_runners=busy_runners,
+                    idle_runners=idle_runners,
+                    utilization_percent=utilization,
+                )
+                if utilization >= 80 and total_runners < settings.max_runners:
+                    queue_length = await self.github_client.get_queue_length()
+                    if queue_length > 0:
+                        logger.info(
+                            "High utilization detected, scaling up",
+                            utilization=utilization,
+                            queue_length=queue_length,
+                        )
+                        await self._scale_up()
+                elif utilization <= 20 and idle_runners > 1 and total_runners > settings.min_runners:
+                    logger.info(
+                        "Low utilization detected, considering scale down",
+                        utilization=utilization,
+                        idle_runners=idle_runners,
+                    )
+                    await self._scale_down()
+            except Exception as e:
+                logger.error("Error monitoring runner utilization", error=str(e))
+            await asyncio.sleep(60)
+
+    async def debug_scaling_state(self) -> None:
+        """Debug method to log current scaling state."""
+        try:
+            github_runners = await self.github_client.get_runners()
+            docker_runners = await self.docker_client.get_runners()
+            queue_length = await self.github_client.get_queue_length()
+            logger.info(
+                "SCALING DEBUG",
+                github_runners_count=len(github_runners),
+                github_runners=[{
+                    "name": r["name"],
+                    "status": r.get("status"),
+                    "busy": r.get("busy", False)
+                } for r in github_runners],
+                docker_runners_count=len([r for r in docker_runners if r["status"] == "running"]),
+                queue_length=queue_length,
+                min_runners=settings.min_runners,
+                max_runners=settings.max_runners,
+                circuit_breaker=self.metrics["circuit_breaker_active"],
+            )
+        except Exception as e:
+            logger.error("Debug scaling state failed", error=str(e))
 
     def _get_container_age_minutes(self, runner_info: Dict) -> float:
         """Calculate how long a container has been running in minutes."""

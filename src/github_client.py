@@ -292,11 +292,10 @@ class GitHubClient:
                 return False
 
     async def get_queue_length(self) -> int:
-        """Get the current queue length of pending workflow runs."""
+        """Get the current queue length of pending workflow runs, considering runner availability."""
         try:
             if self.org:
                 # For organization-level runners, queue-based scaling is not supported
-                # We'll return 0 to disable queue-based scaling
                 logger.debug(
                     "Queue-based scaling disabled for organization-level runners",
                     org=self.org,
@@ -305,14 +304,26 @@ class GitHubClient:
 
             queued_runs = await self.get_workflow_runs("queued")
             in_progress_runs = await self.get_workflow_runs("in_progress")
+            github_runners = await self.get_runners()
+            available_runners = len(
+                [
+                    r
+                    for r in github_runners
+                    if r.get("status") == "online" and not r.get("busy", False)
+                ]
+            )
 
-            # Count runs that need self-hosted runners
-            queue_length = 0
-            for run in queued_runs + in_progress_runs:
-                # This is a simplified check - in reality you might want to check
-                # if the workflow specifically requires self-hosted runners
-                if run.get("status") == "queued":
-                    queue_length += 1
+            total_demand = len(queued_runs) + len(in_progress_runs)
+            queue_length = max(0, total_demand - available_runners)
+
+            logger.debug(
+                "Queue analysis",
+                queued_runs=len(queued_runs),
+                in_progress_runs=len(in_progress_runs),
+                available_runners=available_runners,
+                total_demand=total_demand,
+                calculated_queue_length=queue_length,
+            )
 
             return queue_length
         except Exception as e:
