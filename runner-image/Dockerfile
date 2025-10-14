@@ -50,20 +50,22 @@ RUN apt-get update \
 # --- Playwright system dependencies (GTK3/4, X11, GStreamer, codecs, fonts) ---
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    # core X/graphics
+    # Basics \
+    git \
+    # Core X and graphics \
     libglib2.0-0 libnspr4 libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libxcb1 libxkbcommon0 libatspi2.0-0 libx11-6 libxcomposite1 libxdamage1 \
     libxext6 libxfixes3 libxrandr2 libgbm1 libdrm2 libxshmfence1 libxcursor1 libx11-xcb1 \
-    # GTK stacks
+    # GTK stacks \
     libgtk-3-0 libgdk-pixbuf-2.0-0 libpangocairo-1.0-0 libcairo-gobject2 \
     libgtk-4-1 libgraphene-1.0-0 \
-    # gstreamer
+    # gstreamer \
     libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 libgstreamer-gl1.0-0 \
-    # media/codec libs
+    # media/codec libs \
     libxslt1.1 libwoff1 libvpx7 libevent-2.1-7 libopus0 libflite1 libwebpdemux2 libavif15 \
     libharfbuzz-icu0 libwebpmux3 libenchant-2-2 libsecret-1-0 libhyphen0 libmanette-0.2-0 \
     libgles2 libx264-164 \
-    # runtime helpers
+    # runtime helpers \
     xdg-utils fonts-liberation fonts-noto-core fonts-noto-color-emoji ffmpeg libu2f-udev \
  && rm -rf /var/lib/apt/lists/*
 
