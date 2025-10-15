@@ -1,74 +1,41 @@
 # syntax=docker/dockerfile:1
 
-############################################
-# Build-time default for runner version
-############################################
-ARG RUNNER_VERSION=2.325.0
+FROM python:3.12-slim
 
-############################################
-# Builder: download & extract GitHub runner
-############################################
-FROM debian:bookworm-slim AS builder
-ARG RUNNER_VERSION
-ENV DEBIAN_FRONTEND=noninteractive
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      curl \
-      ca-certificates \
-      tar \
-      gzip \
- && rm -rf /var/lib/apt/lists/*
+# Install Docker CLI (for managing runner containers)
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /runner
-RUN curl -fsSL \
-      https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz \
-    | tar zx --strip-components=1 \
- && chmod +x bin/*
+# Create application directory
+RUN mkdir -p /app/logs
 
-############################################
-# Runtime: Debian Bookworm-Slim + Docker & .NET deps
-############################################
-FROM debian:bookworm-slim AS runtime
-ARG RUNNER_VERSION
-ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /app
 
-# 1) Install OS packages, Docker CLI, qemu, gosu, wget
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      curl \
-      ca-certificates \
-      docker.io \
-      qemu-user-static \
-      gosu \
-      wget \
- && rm -rf /var/lib/apt/lists/*
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 2) Install Docker Compose v2 plugin
-RUN mkdir -p /usr/local/lib/docker/cli-plugins \
- && curl -fsSL \
-      https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-      -o /usr/local/lib/docker/cli-plugins/docker-compose \
- && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+# Copy application code
+COPY . .
 
-# 3) Create non-root 'actions' user & group
-RUN groupadd -r actions \
- && useradd -r -g actions -d /home/actions -m -s /bin/bash actions
+# Expose port
+EXPOSE 8080
 
-# 4) Copy runner bits from builder as 'actions'
-COPY --from=builder --chown=actions:actions /runner /actions-runner
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
-# 5) Run the runner’s dependency installer (installdependencies.sh)
-RUN /actions-runner/bin/installdependencies.sh
-
-# 6) Prepare workspace dirs with correct ownership
-RUN mkdir -p /actions-runner/_work /actions-runner/_tool \
- && chown -R actions:actions /actions-runner/_work /actions-runner/_tool
-
-# 7) Copy and set up entrypoint
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-WORKDIR /actions-runner
-
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Run the orchestrator
+CMD ["python", "main.py"]
