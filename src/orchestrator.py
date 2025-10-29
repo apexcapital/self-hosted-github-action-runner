@@ -58,6 +58,7 @@ class RunnerOrchestrator:
             asyncio.create_task(self._cleanup_dead_containers()),
             asyncio.create_task(self._sync_runners()),
             asyncio.create_task(self._monitor_runner_utilization()),
+            asyncio.create_task(self._maintain_minimum_runners()),
         ]
 
         # Initialize minimum runners
@@ -534,9 +535,16 @@ class RunnerOrchestrator:
             github_runners = await self.github_client.get_runners()
             registered_names = {runner["name"] for runner in github_runners}
 
-            # Count only containers that are both running AND registered
-            registered_running_count = len(
-                [r for r in running_containers if r["runner_name"] in registered_names]
+            # CRITICAL FIX: Count only ONLINE runners, not offline ones
+            online_runners = [
+                r for r in github_runners
+                if r.get("status") == "online"
+            ]
+            online_names = {runner["name"] for runner in online_runners}
+
+            # Count only containers that are both running AND registered AND online
+            online_registered_running_count = len(
+                [r for r in running_containers if r["runner_name"] in online_names]
             )
 
             logger.debug(
@@ -544,12 +552,13 @@ class RunnerOrchestrator:
                 docker_running=len(running_containers),
                 docker_total=len(all_containers),
                 github_registered=len(github_runners),
-                both_running_and_registered=registered_running_count,
+                github_online=len(online_runners),
+                online_and_running=online_registered_running_count,
                 min_required=settings.min_runners,
             )
 
-            # Use registered count for scaling decisions
-            current_count = registered_running_count
+            # Use ONLINE count for scaling decisions
+            current_count = online_registered_running_count
 
         except Exception as e:
             logger.warning(
@@ -578,7 +587,7 @@ class RunnerOrchestrator:
 
             logger.info(
                 "Scaling to minimum runners",
-                current_registered=current_count,
+                current_online=current_count,
                 needed=needed,
                 safe_needed=safe_needed,
                 docker_running=len(running_containers),
@@ -685,6 +694,25 @@ class RunnerOrchestrator:
                     await self._scale_down()
             except Exception as e:
                 logger.error("Error monitoring runner utilization", error=str(e))
+            await asyncio.sleep(60)
+
+    async def _maintain_minimum_runners(self) -> None:
+        """Periodically ensure minimum number of ONLINE runners are maintained."""
+        while self.is_running:
+            try:
+                # Wait before first check to let initial runners come online
+                await asyncio.sleep(60)
+
+                # Only maintain minimum if circuit breaker is not active
+                if not self.metrics.get("circuit_breaker_active", False):
+                    await self._scale_to_minimum()
+                else:
+                    logger.debug("Skipping minimum maintenance due to circuit breaker")
+
+            except Exception as e:
+                logger.error("Error maintaining minimum runners", error=str(e))
+
+            # Check every 60 seconds to ensure we always have minimum runners
             await asyncio.sleep(60)
 
     async def debug_scaling_state(self) -> None:
