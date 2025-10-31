@@ -1,7 +1,7 @@
 """Main orchestrator that manages GitHub Actions runners."""
 
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 import uuid
 
@@ -28,7 +28,7 @@ class RunnerOrchestrator:
         self.is_running = False
         self.running_tasks: List[asyncio.Task] = []
         self.active_runners: Dict[str, Dict] = {}
-        self.metrics = {
+        self.metrics: Dict[str, Any] = {
             "total_runners_created": 0,
             "total_runners_destroyed": 0,
             "current_queue_length": 0,
@@ -432,24 +432,28 @@ class RunnerOrchestrator:
         }
 
     async def _scale_down(self) -> None:
-        """Scale down runners based on registered runner count."""
-        # Count registered runners, not just containers
+        """Scale down runners based on ONLINE runner count (not just registered)."""
+        # CRITICAL FIX: Count only ONLINE runners, not offline registered ones
         try:
             github_runners = await self.github_client.get_runners()
-            current_count = len(github_runners)
-            registered_names = {runner["name"] for runner in github_runners}
+            online_runners = [
+                r for r in github_runners
+                if r.get("status") == "online"
+            ]
+            current_count = len(online_runners)
+            online_names = {runner["name"] for runner in online_runners}
         except Exception as e:
             logger.warning(
                 "Could not get GitHub runners for scale down, using active runners",
                 error=str(e),
             )
             current_count = len(self.active_runners)
-            registered_names = set()
+            online_names = set()
 
         if current_count <= settings.min_runners:
             logger.debug(
                 "Cannot scale down, at minimum runners",
-                current_registered=current_count,
+                current_online=current_count,
                 min=settings.min_runners,
             )
             return
@@ -462,21 +466,21 @@ class RunnerOrchestrator:
 
         logger.info(
             "Scaling down runners",
-            current_registered=current_count,
+            current_online=current_count,
             removing=runners_to_remove,
         )
 
-        # Remove oldest idle runners first, but only if they're registered
+        # Remove oldest idle runners first, but only if they're ONLINE (not offline)
         docker_runners = await self.docker_client.get_runners()
-        registered_containers = [
+        online_containers = [
             r
             for r in docker_runners
-            if r["runner_name"] in registered_names and r["status"] == "running"
+            if r["runner_name"] in online_names and r["status"] == "running"
         ]
 
         # Sort by creation time (oldest first)
         runners_by_age = sorted(
-            registered_containers, key=lambda x: x.get("created_at", "")
+            online_containers, key=lambda x: x.get("created_at", "")
         )
 
         removed = 0
@@ -485,9 +489,31 @@ class RunnerOrchestrator:
                 break
 
             try:
+                # CRITICAL FIX: De-register from GitHub before removing container
+                runner_name = runner_info["runner_name"]
+
+                # Find the GitHub runner ID to delete
+                github_runners_full = await self.github_client.get_runners()
+                github_runner = next(
+                    (r for r in github_runners_full if r["name"] == runner_name),
+                    None
+                )
+
+                if github_runner:
+                    # De-register from GitHub first
+                    await self.github_client.delete_runner(github_runner["id"])
+                    logger.info(
+                        "De-registered runner from GitHub before removal",
+                        runner_name=runner_name,
+                        github_id=github_runner["id"]
+                    )
+
+                # Now remove the container
                 await self.docker_client.remove_runner(runner_info["id"])
                 logger.info(
-                    "Removed runner during scale down", runner_id=runner_info["id"]
+                    "Removed runner during scale down",
+                    runner_id=runner_info["id"],
+                    runner_name=runner_name
                 )
                 removed += 1
                 self.metrics["total_runners_destroyed"] += 1
@@ -665,13 +691,15 @@ class RunnerOrchestrator:
         while self.is_running:
             try:
                 github_runners = await self.github_client.get_runners()
-                total_runners = len(github_runners)
-                busy_runners = len([r for r in github_runners if r.get("status") == "online" and r.get("busy", False)])
+                # CRITICAL FIX: Only count ONLINE runners for utilization calculation
+                online_runners = [r for r in github_runners if r.get("status") == "online"]
+                total_runners = len(online_runners)
+                busy_runners = len([r for r in online_runners if r.get("busy", False)])
                 idle_runners = total_runners - busy_runners
                 utilization = (busy_runners / total_runners * 100) if total_runners > 0 else 0
                 logger.debug(
                     "Runner utilization check",
-                    total_runners=total_runners,
+                    total_online_runners=total_runners,
                     busy_runners=busy_runners,
                     idle_runners=idle_runners,
                     utilization_percent=utilization,
