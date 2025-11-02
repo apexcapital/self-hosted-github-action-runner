@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       labels:
         - "managed-by=runner-orchestrator"
-        - "orchestrator-id=${ORCHESTRATOR_ID:-apex-runner-orchestrator}"
+        - "orchestrator-id=${ORCHESTRATOR_ID:-shghar-orchestrator}"
         - "orchestrator-version=${ORCHESTRATOR_VERSION:-1.0.0}"
         - "component=orchestrator"
         - "built-at=${BUILD_TIMESTAMP:-}"
@@ -22,7 +22,7 @@ services:
       ORCHESTRATOR_GITHUB_REPO: ${ORCHESTRATOR_GITHUB_REPO:-}
       
       # Runner Configuration
-      ORCHESTRATOR_RUNNER_IMAGE: ${ORCHESTRATOR_RUNNER_IMAGE:-"apex-runner:local"}
+      ORCHESTRATOR_RUNNER_IMAGE: ${ORCHESTRATOR_RUNNER_IMAGE:-"shghar:local"}
       ORCHESTRATOR_RUNNER_VERSION: ${ORCHESTRATOR_RUNNER_VERSION:-2.325.0}
       
       # Runner Environment Configuration
@@ -47,7 +47,7 @@ services:
       ORCHESTRATOR_STRUCTURED_LOGGING: ${ORCHESTRATOR_STRUCTURED_LOGGING:-true}
       
       # Orchestrator Identification
-      ORCHESTRATOR_ID: ${ORCHESTRATOR_ID:-apex-runner-orchestrator}
+      ORCHESTRATOR_ID: ${ORCHESTRATOR_ID:-shghar-orchestrator}
       ORCHESTRATOR_VERSION: ${ORCHESTRATOR_VERSION:-1.0.0}
       
       # Docker Configuration
@@ -60,7 +60,7 @@ services:
       - runner-network
     labels:
       - "managed-by=runner-orchestrator"
-      - "orchestrator-id=${ORCHESTRATOR_ID:-apex-runner-orchestrator}"
+      - "orchestrator-id=${ORCHESTRATOR_ID:-shghar-orchestrator}"
       - "orchestrator-version=${ORCHESTRATOR_VERSION:-1.0.0}"
       - "component=orchestrator"
       - "type=orchestrator-container"
@@ -76,7 +76,7 @@ networks:
     driver: bridge
     labels:
       managed-by: "runner-orchestrator"
-      orchestrator-id: "${ORCHESTRATOR_ID:-apex-runner-orchestrator}"
+      orchestrator-id: "${ORCHESTRATOR_ID:-shghar-orchestrator}"
       orchestrator-version: "${ORCHESTRATOR_VERSION:-1.0.0}"
       type: "runner-network"
 
@@ -84,7 +84,7 @@ volumes:
   orchestrator-logs:
     labels:
       managed-by: "runner-orchestrator"
-      orchestrator-id: "${ORCHESTRATOR_ID:-apex-runner-orchestrator}"
+      orchestrator-id: "${ORCHESTRATOR_ID:-shghar-orchestrator}"
       orchestrator-version: "${ORCHESTRATOR_VERSION:-1.0.0}"
       type: "orchestrator-logs"
  

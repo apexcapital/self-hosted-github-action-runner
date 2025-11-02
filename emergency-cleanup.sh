@@ -9,10 +9,10 @@ echo "🚨 Emergency cleanup of runaway GitHub runners"
 echo "=============================================="
 
 # Count containers before cleanup
-RUNNER_CONTAINERS=$(docker ps -a -q --filter "name=github-runner" --filter "name=apex-runner" 2>/dev/null || true)
+RUNNER_CONTAINERS=$(docker ps -a -q --filter "name=github-runner" --filter "name=shghar" 2>/dev/null || true)
 TOTAL_COUNT=$(echo "$RUNNER_CONTAINERS" | wc -w)
 
-echo "Found $TOTAL_COUNT runner containers (matching github-runner or apex-runner)"
+echo "Found $TOTAL_COUNT runner containers (matching github-runner or shghar)"
 
 if [ "$TOTAL_COUNT" -eq 0 ]; then
     echo "✅ No github-runner containers found"
@@ -48,12 +48,12 @@ if [ -n "$RUNNER_VOLUMES" ]; then
 fi
 
 # Final count
-REMAINING=$(docker ps -a -q --filter "name=github-runner" --filter "name=apex-runner" 2>/dev/null | wc -l)
+REMAINING=$(docker ps -a -q --filter "name=github-runner" --filter "name=shghar" 2>/dev/null | wc -l)
 echo ""
 echo "🎉 Emergency cleanup completed!"
 echo "   - Removed: $TOTAL_COUNT containers"
 echo "   - Remaining: $REMAINING containers"
 
 if [ "$REMAINING" -gt 0 ]; then
-    echo "⚠️  Some containers may still exist. Check with: docker ps -a --filter 'name=github-runner' --filter 'name=apex-runner'"
+    echo "⚠️  Some containers may still exist. Check with: docker ps -a --filter 'name=github-runner' --filter 'name=shghar'"
 fi

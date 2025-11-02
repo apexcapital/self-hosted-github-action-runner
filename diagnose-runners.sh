@@ -37,7 +37,7 @@ fi
 
 echo ""
 echo "4. Docker images available:"
-docker images | grep -E "(github-runner|myoung34|apex-runner)" || true
+docker images | grep -E "(github-runner|myoung34|shghar)" || true
 
 echo ""
 echo "5. Network status:"

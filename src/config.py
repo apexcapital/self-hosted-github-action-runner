@@ -17,9 +17,9 @@ class Settings(BaseSettings):
 
     # Runner Configuration
     runner_image: str = Field(
-        "apex-runner:local", description="Docker image for runners"
+        "shghar:local", description="Docker image for runners"
     )
-    runner_version: str = Field("2.325.0", description="GitHub Actions runner version")
+    runner_version: str = Field("2.328.0", description="GitHub Actions runner version")
 
     runner_labels: str = Field(
         default="orchestrated,optimized,self-hosted,linux,docker-dind",
@@ -34,13 +34,29 @@ class Settings(BaseSettings):
         description="Unset config vars before starting runner (prevents leaking to workflows)",
     )
     runner_start_docker_service: bool = Field(
-        True, description="Auto-start Docker service in runner container"
+        True, description="Auto-start Docker service in runner container (DinD mode)"
     )
     runner_no_default_labels: bool = Field(
-        False, description="Disable adding default self-hosted labels"
+        False, description="Disable adding default self-hosted labels (docker-dind,linux,self-hosted,optimized)"
     )
     runner_debug_output: bool = Field(
-        False, description="Enable additional debug output in runner"
+        False, description="Enable additional debug output in runner (set -x in entrypoint)"
+    )
+
+    # Node.js Configuration
+    node_version: str = Field(
+        "22", description="Node.js major version to install (e.g., 18, 20, 22)"
+    )
+    node_env: str = Field(
+        "production", description="Node.js environment mode (development, production)"
+    )
+
+    # Playwright Configuration
+    playwright_browsers_path: str = Field(
+        "/ms-playwright", description="Playwright browser cache directory"
+    )
+    ci: str = Field(
+        "true", description="CI environment flag for Playwright and other tools"
     )
 
     # Scaling Configuration
