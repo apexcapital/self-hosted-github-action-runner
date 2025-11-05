@@ -1,6 +1,6 @@
 """Docker client for managing runner containers."""
 
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Any
 from datetime import datetime, timezone
 import uuid
 
@@ -19,7 +19,7 @@ class DockerClient:
     def __init__(self):
         """Initialize Docker client."""
         self.client = docker.from_env()
-        self.container_prefix = "github-runner"
+        self.container_prefix = settings.runner_name_prefix
 
         # Ensure network exists
         self._ensure_network()
@@ -28,6 +28,7 @@ class DockerClient:
         """Ensure the runner network exists."""
         try:
             self.client.networks.get(settings.runner_network)
+            logger.debug("Runner network exists", network=settings.runner_network)
         except DockerNotFound:
             logger.info("Creating runner network", network=settings.runner_network)
             self.client.networks.create(
@@ -48,7 +49,6 @@ class DockerClient:
             runner_name: Name for the runner
             repo_url: GitHub repository URL
             runner_token: Registration token
-            labels: Additional labels for the runner
 
         Returns:
             Container ID
@@ -68,6 +68,17 @@ class DockerClient:
             "START_DOCKER_SERVICE": str(settings.runner_start_docker_service).lower(),
             "NO_DEFAULT_LABELS": str(settings.runner_no_default_labels).lower(),
             "DEBUG_OUTPUT": str(settings.runner_debug_output).lower(),
+            # Docker daemon configuration (for DinD mode)
+            "DOCKER_BUILDKIT": "1",
+            "DOCKER_DATA_ROOT": "/var/lib/docker",
+            "DOCKER_DRIVER": "overlay2",
+            "DOCKER_CGROUP_DRIVER": "cgroupfs",
+            "DOCKERD_LOG_LEVEL": "info",
+            # Node.js configuration (from settings)
+            "NODE_ENV": settings.node_env,
+            # Playwright configuration (from settings)
+            "CI": settings.ci,
+            "PLAYWRIGHT_BROWSERS_PATH": settings.playwright_browsers_path,
         }
 
         # Create volume for runner work directory
@@ -77,6 +88,7 @@ class DockerClient:
                 name=work_volume_name,
                 labels={"runner": runner_name, "managed-by": "runner-orchestrator"},
             )
+            logger.debug("Created work volume", volume=work_volume_name)
         except APIError as e:
             logger.warning(
                 "Volume might already exist", volume=work_volume_name, error=str(e)
@@ -96,16 +108,24 @@ class DockerClient:
             "labels": {
                 "managed-by": "runner-orchestrator",
                 "runner-name": runner_name,
+                "runner-version": settings.runner_version,
                 "created-at": datetime.now(timezone.utc).isoformat(),
                 "repo-url": repo_url,
+                "image": settings.runner_image,
             },
             "privileged": True,  # Required for Docker-in-Docker
             "detach": True,
+            # Security: drop unnecessary capabilities while maintaining DinD functionality
+            # Note: privileged=True gives all caps, but we document the minimum needed
+            "cap_add": ["SYS_ADMIN", "NET_ADMIN"],  # Documented for clarity
         }
 
         try:
             logger.info(
-                "Creating runner container", name=container_name, runner=runner_name
+                "Creating runner container",
+                name=container_name,
+                runner=runner_name,
+                image=settings.runner_image,
             )
             container = self.client.containers.run(**container_config)
 
@@ -129,6 +149,7 @@ class DockerClient:
             try:
                 volume = self.client.volumes.get(work_volume_name)
                 volume.remove()
+                logger.debug("Cleaned up volume after failed creation", volume=work_volume_name)
             except (DockerNotFound, APIError):
                 pass
             raise
@@ -208,9 +229,9 @@ class DockerClient:
                         continue
 
                     # Skip existing actions-runner-* containers that we should not manage
-                    if container.name.startswith("actions-runner-"):
+                    if container.name.startswith("actions-runner-") and not container.name.startswith(self.container_prefix):
                         logger.debug(
-                            "Ignoring existing actions-runner container",
+                            "Ignoring non-orchestrated actions-runner container",
                             name=container.name,
                         )
                         continue
@@ -223,12 +244,13 @@ class DockerClient:
                         "name": container.name,
                         "status": container.status,
                         "runner_name": container.labels.get("runner-name"),
+                        "runner_version": container.labels.get("runner-version"),
                         "created_at": container.labels.get("created-at"),
                         "repo_url": container.labels.get("repo-url"),
                         "image": (
                             container.image.tags[0]
                             if container.image.tags
-                            else "unknown"
+                            else container.labels.get("image", "unknown")
                         ),
                     }
                     runners.append(runner_info)

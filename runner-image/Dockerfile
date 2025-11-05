@@ -2,6 +2,7 @@
 
 ARG RUNNER_VERSION=2.328.0
 ARG BASE_IMAGE=debian:bookworm-slim
+ARG NODE_VERSION=22
 ARG TARGETARCH
 
 ##############################
@@ -22,7 +23,11 @@ RUN set -eux; \
     *)             ARCH=x64 ;; \
   esac; \
   curl -fsSL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${ARCH}-${RUNNER_VERSION}.tar.gz" \
-    | tar zx --strip-components=1; \
+    -o runner.tar.gz; \
+  echo "Verifying download..."; \
+  tar -tzf runner.tar.gz > /dev/null; \
+  tar -xzf runner.tar.gz --strip-components=1; \
+  rm runner.tar.gz; \
   chmod +x bin/*
 
 ############################################
@@ -30,6 +35,7 @@ RUN set -eux; \
 ############################################
 FROM ${BASE_IMAGE} AS runtime
 ARG RUNNER_VERSION
+ARG NODE_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Core utilities + Docker Engine (dockerd/cli/buildx/compose)
@@ -45,7 +51,8 @@ RUN apt-get update \
     > /etc/apt/sources.list.d/docker.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+ && rm -rf /var/lib/apt/lists/*
 
 # --- Playwright system dependencies (GTK3/4, X11, GStreamer, codecs, fonts) ---
 RUN apt-get update \
@@ -77,34 +84,54 @@ RUN groupadd -r actions \
 COPY --from=builder --chown=actions:actions /runner /actions-runner
 RUN /actions-runner/bin/installdependencies.sh || true
 
-# Workspace dirs
+# Workspace dirs with proper permissions
 RUN mkdir -p /actions-runner/_work /actions-runner/_tool \
- && chown -R actions:actions /actions-runner/_work /actions-runner/_tool
+ && chown -R actions:actions /actions-runner/_work /actions-runner/_tool \
+ && chmod 755 /actions-runner/_work /actions-runner/_tool
 
 # --- Node.js LTS and Playwright (install as actions user) ---
-# Use NodeSource for Node 22 LTS (bookworm repo node can lag)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# Use NodeSource for Node.js LTS (bookworm repo node can lag)
+RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash - \
  && apt-get update \
  && apt-get install -y --no-install-recommends nodejs \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && npm config set fund false \
+ && npm config set audit false
 
 # Ensure ldconfig available in PATH for Playwright validation in non-root shells
 ENV PATH="/sbin:/usr/sbin:${PATH}"
+# Note: CI, PLAYWRIGHT_BROWSERS_PATH, and NODE_ENV are now set at runtime via orchestrator
+# These ENV declarations serve as defaults if not overridden
 ENV CI=true \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    NODE_ENV=production
 
-# Prepare Playwright dirs
-RUN mkdir -p /ms-playwright && chown -R actions:actions /ms-playwright
+# Prepare Playwright dirs with proper permissions
+RUN mkdir -p /ms-playwright \
+ && chown -R actions:actions /ms-playwright \
+ && chmod 755 /ms-playwright
 
 # DinD state (optional)
 VOLUME ["/var/lib/docker"]
 
-# Apex Docker daemon config (optional)
+# Copy Docker daemon config with validation
 COPY daemon.json /etc/docker/daemon.json
+RUN test -s /etc/docker/daemon.json && chmod 644 /etc/docker/daemon.json
 
-# Entrypoint
+# Entrypoint with proper permissions
 COPY runner-image/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh \
+ && test -x /usr/local/bin/entrypoint.sh
+
+# Security: Remove setuid/setgid bits from unnecessary binaries (hardening)
+RUN find /usr/bin /usr/sbin /bin /sbin -perm /6000 -type f -exec chmod a-s {} \; 2>/dev/null || true
+
+# Metadata labels
+LABEL org.opencontainers.image.title="GitHub Actions Self-Hosted Runner" \
+      org.opencontainers.image.description="Custom runner with Docker-in-Docker and Playwright support" \
+      org.opencontainers.image.version="${RUNNER_VERSION}" \
+      org.opencontainers.image.vendor="Custom" \
+      maintainer="nate.brandeburg"
 
 WORKDIR /actions-runner
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

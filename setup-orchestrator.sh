@@ -160,10 +160,10 @@ deploy_orchestrator() {
     
     # Build the custom runner image from runner-image/Dockerfile
     if [[ -f runner-image/Dockerfile ]]; then
-        print_info "Building custom runner image apex-runner:local..."
+        print_info "Building custom runner image shghar:local..."
         # Build from repository root so files like ./daemon.json (repo root)
         # are available to the Docker build via the build context.
-        if docker build -t apex-runner:local -f runner-image/Dockerfile .; then
+        if docker build -t shghar:local -f runner-image/Dockerfile .; then
             print_success "Custom runner image built successfully"
         else
             print_error "Failed to build custom runner image"
@@ -414,7 +414,7 @@ case "${1:-}" in
             fi
 
             # Remove locally built runner image if present
-            docker rmi apex-runner:local 2>/dev/null || true
+            docker rmi shghar:local 2>/dev/null || true
             print_success "Cleanup completed"
         ;;
     "status")
