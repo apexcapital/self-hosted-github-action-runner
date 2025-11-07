@@ -52,6 +52,72 @@ set_env_var() {
     awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v;found=1} {print} END{if(!found) print k"="v}' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
 }
 
+# Generate daemon.json from environment variables
+generate_daemon_json() {
+    local dns_servers=""
+    local dns_search=""
+
+    # Load ORCHESTRATOR_DOCKER_DNS and ORCHESTRATOR_DOCKER_DNS_SEARCH from .env if they exist
+    if [[ -f .env ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # skip comments and blank lines
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$line" ]] && continue
+
+            key="${line%%=*}"
+            val="${line#*=}"
+
+            case "$key" in
+                ORCHESTRATOR_DOCKER_DNS|ORCHESTRATOR_DOCKER_DNS_SEARCH)
+                    # trim leading/trailing whitespace
+                    val="${val#${val%%[![:space:]]*}}"
+                    val="${val%${val##*[![:space:]]}}"
+
+                    # remove surrounding quotes
+                    first_char="${val:0:1}"
+                    last_char="${val:$((${#val}-1)):1}"
+                    if [[ ( "$first_char" == '"' && "$last_char" == '"' ) || ( "$first_char" == "'" && "$last_char" == "'" ) ]]; then
+                        val="${val:1:$((${#val}-2))}"
+                    fi
+
+                    if [[ "$key" == "ORCHESTRATOR_DOCKER_DNS" ]]; then
+                        dns_servers="$val"
+                    elif [[ "$key" == "ORCHESTRATOR_DOCKER_DNS_SEARCH" ]]; then
+                        dns_search="$val"
+                    fi
+                    ;;
+            esac
+        done < .env
+    fi
+
+    # Start building daemon.json
+    local daemon_json="{}"
+
+    # Add DNS servers if provided
+    if [[ -n "$dns_servers" ]]; then
+        # Convert comma-separated to JSON array
+        local dns_array=$(echo "$dns_servers" | python3 -c "import sys, json; print(json.dumps([s.strip() for s in sys.stdin.read().split(',') if s.strip()]))")
+        daemon_json=$(echo "$daemon_json" | python3 -c "import sys, json; data=json.load(sys.stdin); data['dns']=$dns_array; print(json.dumps(data, indent=2))")
+    fi
+
+    # Add DNS search domains if provided
+    if [[ -n "$dns_search" ]]; then
+        # Convert comma-separated to JSON array
+        local search_array=$(echo "$dns_search" | python3 -c "import sys, json; print(json.dumps([s.strip() for s in sys.stdin.read().split(',') if s.strip()]))")
+        daemon_json=$(echo "$daemon_json" | python3 -c "import sys, json; data=json.load(sys.stdin); data['dns-search']=$search_array; print(json.dumps(data, indent=2))")
+    fi
+
+    # Write daemon.json if there's content to add
+    if [[ "$daemon_json" != "{}" ]]; then
+        echo "$daemon_json" > daemon.json
+        print_success "Generated daemon.json from environment variables"
+    else
+        # Create empty daemon.json if no DNS config provided
+        echo "{}" > daemon.json
+        print_info "Created empty daemon.json (no DNS configuration in .env)"
+    fi
+}
+
 # Check prerequisites
 check_prerequisites() {
     print_info "Checking prerequisites..."
@@ -349,6 +415,7 @@ main() {
     check_prerequisites
     cleanup_old_system
     setup_environment
+    generate_daemon_json
     deploy_orchestrator
     wait_for_services
     show_status
